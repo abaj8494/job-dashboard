@@ -1,0 +1,204 @@
+import { NextRequest, NextResponse } from "next/server";
+import prisma from "@/lib/db";
+import {
+  queryNewEmails,
+  markEmailProcessed,
+  isNotmuchAvailable,
+} from "@/lib/email/notmuch";
+import { parseEmailFile } from "@/lib/email/parser";
+import { classifyEmail, isJobRelated, meetsConfidenceThreshold } from "@/lib/email/classifier";
+
+const API_KEY = process.env.EMAIL_SYNC_API_KEY;
+const MONITORED_EMAILS = (
+  process.env.MONITORED_EMAILS || "j@abaj.ai,aayushbajaj7@gmail.com"
+).split(",");
+
+interface SyncResult {
+  processed: number;
+  skipped: number;
+  errors: string[];
+}
+
+/**
+ * POST /api/email-sync
+ *
+ * Called by notmuch post-new hook to sync new emails.
+ * Protected by API key (not user auth since called by shell script).
+ */
+export const POST = async (req: NextRequest) => {
+  // Verify API key
+  const authHeader = req.headers.get("x-api-key");
+  if (!API_KEY) {
+    return NextResponse.json(
+      { error: "EMAIL_SYNC_API_KEY not configured" },
+      { status: 500 }
+    );
+  }
+  if (authHeader !== API_KEY) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  try {
+    // Check if notmuch is available
+    const notmuchAvailable = await isNotmuchAvailable();
+    if (!notmuchAvailable) {
+      return NextResponse.json(
+        { error: "notmuch is not installed or not accessible" },
+        { status: 500 }
+      );
+    }
+
+    // Find the user (for now, assume single user based on email)
+    // In future, could support multiple users
+    const user = await prisma.user.findFirst();
+    if (!user) {
+      return NextResponse.json(
+        { error: "No user found in database" },
+        { status: 500 }
+      );
+    }
+
+    // Ensure email accounts exist for monitored emails
+    for (const email of MONITORED_EMAILS) {
+      await prisma.emailAccount.upsert({
+        where: { email },
+        update: {},
+        create: {
+          userId: user.id,
+          email,
+          isActive: true,
+        },
+      });
+    }
+
+    // Query notmuch for new emails
+    const emailPaths = await queryNewEmails();
+
+    if (emailPaths.length === 0) {
+      return NextResponse.json({
+        message: "No new job-related emails",
+        processed: 0,
+        skipped: 0,
+      });
+    }
+
+    const result: SyncResult = {
+      processed: 0,
+      skipped: 0,
+      errors: [],
+    };
+
+    // Process each email
+    for (const filePath of emailPaths) {
+      try {
+        // Parse the email
+        const parsed = await parseEmailFile(filePath);
+
+        // Check for duplicate by message ID
+        const existing = await prisma.emailImport.findUnique({
+          where: { messageId: parsed.messageId },
+        });
+
+        if (existing) {
+          result.skipped++;
+          continue;
+        }
+
+        // Classify the email with LLM
+        const classification = await classifyEmail(parsed);
+
+        // Skip non-job-related emails or low confidence
+        if (!isJobRelated(classification) || !meetsConfidenceThreshold(classification)) {
+          // Mark as processed in notmuch to avoid re-processing
+          await markEmailProcessed(parsed.messageId);
+          result.skipped++;
+          continue;
+        }
+
+        // Find the email account
+        const emailAddress = parsed.isOutbound ? parsed.from : parsed.to;
+        const emailAccount = await prisma.emailAccount.findFirst({
+          where: {
+            email: {
+              in: MONITORED_EMAILS,
+            },
+            isActive: true,
+          },
+        });
+
+        if (!emailAccount) {
+          result.skipped++;
+          continue;
+        }
+
+        // Store in queue for review
+        await prisma.emailImport.create({
+          data: {
+            userId: user.id,
+            emailAccountId: emailAccount.id,
+            messageId: parsed.messageId,
+            subject: parsed.subject,
+            fromEmail: parsed.from,
+            fromName: parsed.fromName,
+            toEmail: parsed.to,
+            emailDate: parsed.date,
+            bodyText: parsed.textBody?.substring(0, 10000) || null,
+            bodyHtml: parsed.htmlBody?.substring(0, 50000) || null,
+            classification: classification.type,
+            confidence: classification.confidence,
+            isOutbound: parsed.isOutbound,
+            extractedData: JSON.stringify(classification.extractedData),
+            status: "pending",
+          },
+        });
+
+        // Mark as processed in notmuch
+        await markEmailProcessed(parsed.messageId);
+        result.processed++;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+        result.errors.push(`Error processing ${filePath}: ${errorMessage}`);
+      }
+    }
+
+    return NextResponse.json({
+      message: "Email sync completed",
+      ...result,
+      errors: result.errors.length > 0 ? result.errors : undefined,
+    });
+  } catch (error) {
+    console.error("Email sync error:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Email sync failed" },
+      { status: 500 }
+    );
+  }
+};
+
+/**
+ * GET /api/email-sync
+ *
+ * Get pending email import count (for dashboard indicator)
+ */
+export const GET = async (req: NextRequest) => {
+  // This endpoint can be called from the UI, so use session auth
+  // For simplicity, we'll make it public for now (just returns counts)
+
+  try {
+    const pendingCount = await prisma.emailImport.count({
+      where: { status: "pending" },
+    });
+
+    const totalCount = await prisma.emailImport.count();
+
+    return NextResponse.json({
+      pending: pendingCount,
+      total: totalCount,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: "Failed to get email import stats" },
+      { status: 500 }
+    );
+  }
+};
