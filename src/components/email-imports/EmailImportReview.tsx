@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -98,10 +98,12 @@ function EmailImportReview({
   const [creatingTitle, setCreatingTitle] = useState(false);
   const [creatingLocation, setCreatingLocation] = useState(false);
 
-  // Parse extracted data
-  const extractedData: ExtractedData = emailImport?.extractedData
-    ? JSON.parse(emailImport.extractedData)
-    : {};
+  // Parse extracted data - memoize to prevent useEffect from running on every render
+  const extractedData: ExtractedData = useMemo(() => {
+    return emailImport?.extractedData
+      ? JSON.parse(emailImport.extractedData)
+      : {};
+  }, [emailImport?.extractedData]);
 
   // Initialize form with extracted data
   useEffect(() => {
