@@ -1,3 +1,4 @@
+import AccountSettings from "@/components/settings/AccountSettings";
 import AiSettings from "@/components/settings/AiSettings";
 import DisplaySettings from "@/components/settings/DisplaySettings";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -9,11 +10,15 @@ function Settings() {
       <h3 className="text-2xl font-semibold leading-none tracking-tight mb-4">
         Settings
       </h3>
-      <Tabs defaultValue="ai">
+      <Tabs defaultValue="account">
         <TabsList>
+          <TabsTrigger value="account">Account</TabsTrigger>
           <TabsTrigger value="ai">AI</TabsTrigger>
           <TabsTrigger value="display">Display</TabsTrigger>
         </TabsList>
+        <TabsContent value="account">
+          <AccountSettings />
+        </TabsContent>
         <TabsContent value="display">
           <DisplaySettings />
         </TabsContent>

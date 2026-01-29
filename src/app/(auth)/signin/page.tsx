@@ -1,5 +1,3 @@
-import Link from "next/link";
-
 import {
   Card,
   CardContent,
@@ -25,12 +23,6 @@ export default function Signin() {
       </CardHeader>
       <CardContent>
         <SigninForm />
-        <div className="mt-4 text-center text-sm">
-          Don&apos;t have an account?{" "}
-          <Link href="/signup" className="underline">
-            Sign up
-          </Link>
-        </div>
       </CardContent>
     </Card>
   );

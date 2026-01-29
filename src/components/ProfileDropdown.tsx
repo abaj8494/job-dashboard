@@ -17,17 +17,18 @@ import { SupportDialog } from "./SupportDialog";
 
 interface ProfileDropdownProps {
   user: any;
+  userImage?: string | null;
   signOutAction: () => void;
 }
 
-export function ProfileDropdown({ user, signOutAction }: ProfileDropdownProps) {
+export function ProfileDropdown({ user, userImage, signOutAction }: ProfileDropdownProps) {
   const [supportDialogOpen, setSupportDialogOpen] = useState(false);
 
   return (
     <>
       <DropdownMenu>
         <DropdownMenuTrigger>
-          <UserAvatar user={user} />
+          <UserAvatar user={user} image={userImage} />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           <DropdownMenuLabel>My Account</DropdownMenuLabel>

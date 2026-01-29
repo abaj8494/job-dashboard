@@ -256,27 +256,12 @@ npx ts-node scripts/jobsync-local-sync.ts
 
 ```bash
 # Live logs
-docker compose -f docker-compose.prod.yml logs -f
-
-# Last 100 lines
-docker compose -f docker-compose.prod.yml logs --tail 100
-
-# Specific service
-docker logs jobsync --tail 100 -f
-```
+docker compose -f docker-compose.prod.yml logs -f # Last 100 lines docker compose -f docker-compose.prod.yml logs --tail 100 # Specific service docker logs jobsync --tail 100 -f ```
 
 ### Database Access
 
 ```bash
-# Shell into container
-docker exec -it jobsync sh
-
-# Query database
-sqlite3 /data/dev.db "SELECT COUNT(*) FROM EmailImport WHERE status='pending';"
-
-# Or from host (if you mounted the data directory)
-sqlite3 ./data/dev.db ".tables"
-```
+# Shell into container docker exec -it jobsync sh # Query database sqlite3 /data/dev.db "SELECT COUNT(*) FROM EmailImport WHERE status='pending';" # Or from host (if you mounted the data directory) sqlite3 ./data/dev.db ".tables" ```
 
 ### Health Checks
 

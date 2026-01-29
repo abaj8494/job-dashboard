@@ -110,6 +110,13 @@ export function Combobox({ options, field, creatable }: ComboboxProps) {
             value={newOption}
             onValueChange={(val: string) => setNewOption(val)}
             placeholder={`${creatable ? "Create or " : ""}Search ${field.name}`}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && creatable && newOption && options.every(o => o.label?.toLowerCase() !== newOption.toLowerCase())) {
+                e.preventDefault();
+                onCreateOption(newOption);
+                setNewOption("");
+              }
+            }}
           />
           <CommandEmpty
             onClick={() => {
