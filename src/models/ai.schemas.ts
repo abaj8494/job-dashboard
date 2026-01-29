@@ -235,3 +235,82 @@ export type SkillsAnalysis = z.infer<typeof SkillsAnalysisSchema>;
 export type ExperienceAnalysis = z.infer<typeof ExperienceAnalysisSchema>;
 export type KeywordsAnalysis = z.infer<typeof KeywordsAnalysisSchema>;
 export type TailoringTip = z.infer<typeof TailoringTipSchema>;
+
+// EMAIL CLASSIFICATION SCHEMA
+// Used for classifying job-related emails from Maildir
+
+const ExtractedJobDataSchema = z.object({
+  company: z
+    .string()
+    .nullable()
+    .describe("Company name if identifiable (not the ATS provider like Greenhouse/Lever)"),
+  jobTitle: z
+    .string()
+    .nullable()
+    .describe("Job title/position if mentioned in the email"),
+  location: z
+    .string()
+    .nullable()
+    .describe("Job location if mentioned (city, state, or remote)"),
+  applicationUrl: z
+    .string()
+    .nullable()
+    .describe("URL to job posting or application portal if present"),
+  recruiterName: z
+    .string()
+    .nullable()
+    .describe("Recruiter or hiring manager name if mentioned"),
+  interviewDate: z
+    .string()
+    .nullable()
+    .describe("Interview date if this is a scheduling email (ISO format preferred)"),
+  deadline: z
+    .string()
+    .nullable()
+    .describe("Application deadline if mentioned"),
+  salaryRange: z
+    .string()
+    .nullable()
+    .describe("Salary range if mentioned in the email"),
+});
+
+/**
+ * Email Classification Schema
+ * Used to classify job-related emails and extract structured data
+ */
+export const EmailClassificationSchema = z.object({
+  type: z
+    .enum([
+      "job_application",
+      "job_response",
+      "interview",
+      "rejection",
+      "offer",
+      "follow_up",
+      "other",
+    ])
+    .describe(
+      `Classification type:
+      - job_application: Email SENT BY the user applying for a job (outbound)
+      - job_response: Initial response from company acknowledging application
+      - interview: Interview invitation or scheduling
+      - rejection: Application rejection or "position filled" notification
+      - offer: Job offer or salary negotiation
+      - follow_up: Follow-up emails about application status
+      - other: Not job-related (newsletters, spam, personal, etc.)`
+    ),
+  confidence: z
+    .number()
+    .min(0)
+    .max(1)
+    .describe("Confidence score 0-1. Be conservative: if uncertain, use lower confidence."),
+  reasoning: z
+    .string()
+    .describe("Brief 1-2 sentence explanation for the classification decision"),
+  extractedData: ExtractedJobDataSchema.describe(
+    "Extracted job information. Only include data explicitly stated in the email."
+  ),
+});
+
+export type EmailClassificationResponse = z.infer<typeof EmailClassificationSchema>;
+export type ExtractedJobData = z.infer<typeof ExtractedJobDataSchema>;
