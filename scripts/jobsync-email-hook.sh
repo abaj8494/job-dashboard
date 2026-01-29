@@ -1,19 +1,14 @@
 #!/bin/bash
 # JobSync Email Sync Hook
 # This script is called by notmuch post-new hook to sync job-related emails
-#
-# Setup instructions:
-# 1. Make this script executable: chmod +x scripts/jobsync-email-hook.sh
-# 2. Create the notmuch hooks directory: mkdir -p ~/.notmuch/hooks
-# 3. Create or edit ~/.notmuch/hooks/post-new with:
-#    #!/bin/bash
-#    /path/to/jobsync/scripts/jobsync-email-hook.sh
-# 4. Make the hook executable: chmod +x ~/.notmuch/hooks/post-new
-# 5. Set environment variables in your shell config (.bashrc, .zshrc):
-#    export JOBSYNC_API_KEY="your-api-key-from-.env"
-#    export JOBSYNC_API_URL="http://localhost:3000/api/email-sync"
 
-# Configuration
+# Load config from ~/.jobsync/config (works even when run from Emacs)
+CONFIG_FILE="${HOME}/.jobsync/config"
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# Configuration (fallback to env vars or defaults)
 JOBSYNC_API_URL="${JOBSYNC_API_URL:-http://localhost:3000/api/email-sync}"
 JOBSYNC_API_KEY="${JOBSYNC_API_KEY:-}"
 LOG_DIR="${HOME}/.jobsync"

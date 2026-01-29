@@ -54,8 +54,10 @@ export async function queryNewEmails(): Promise<string[]> {
  */
 export async function getMessageIdFromFile(filePath: string): Promise<string | null> {
   try {
+    // Escape filepath for shell
+    const escapedPath = filePath.replace(/'/g, "'\\''");
     const { stdout } = await execAsync(
-      `notmuch search --output=messages "path:${filePath}"`,
+      `notmuch search --output=messages 'path:${escapedPath}'`,
       {
         env: { ...process.env, NOTMUCH_CONFIG: `${process.env.HOME}/.notmuch-config` },
       }
@@ -72,8 +74,10 @@ export async function getMessageIdFromFile(filePath: string): Promise<string | n
  */
 export async function markEmailProcessed(messageId: string): Promise<void> {
   try {
+    // Escape the message ID for shell - wrap in single quotes and escape any single quotes inside
+    const escapedId = messageId.replace(/'/g, "'\\''");
     await execAsync(
-      `notmuch tag -new +jobsync-processed -- id:${messageId}`,
+      `notmuch tag -new +jobsync-processed -- 'id:${escapedId}'`,
       {
         env: { ...process.env, NOTMUCH_CONFIG: `${process.env.HOME}/.notmuch-config` },
       }
