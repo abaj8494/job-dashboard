@@ -27,6 +27,8 @@ model User {
   Activity     Activity[]
   ActivityType ActivityType[]
   Task         Task[]
+  EmailAccount EmailAccount[]
+  EmailImport  EmailImport[]
 }
 
 model Profile {
@@ -217,30 +219,31 @@ model Interview {
 }
 
 model Job {
-  id          String      @id @default(uuid())
+  id          String       @id @default(uuid())
   userId      String
-  User        User        @relation(fields: [userId], references: [id])
+  User        User         @relation(fields: [userId], references: [id])
   jobUrl      String?
   description String
   jobType     String
   createdAt   DateTime
-  applied     Boolean     @default(false)
+  applied     Boolean      @default(false)
   appliedDate DateTime?
   dueDate     DateTime?
   statusId    String
-  Status      JobStatus   @relation(fields: [statusId], references: [id])
-  JobTitle    JobTitle    @relation(fields: [jobTitleId], references: [id])
+  Status      JobStatus    @relation(fields: [statusId], references: [id])
+  JobTitle    JobTitle     @relation(fields: [jobTitleId], references: [id])
   jobTitleId  String
-  Company     Company     @relation(fields: [companyId], references: [id])
+  Company     Company      @relation(fields: [companyId], references: [id])
   companyId   String
-  JobSource   JobSource?  @relation(fields: [jobSourceId], references: [id])
+  JobSource   JobSource?   @relation(fields: [jobSourceId], references: [id])
   jobSourceId String?
   salaryRange String?
-  Location    Location?   @relation(fields: [locationId], references: [id])
+  Location    Location?    @relation(fields: [locationId], references: [id])
   locationId  String?
   Interview   Interview[]
-  Resume      Resume?     @relation(fields: [resumeId], references: [id])
+  Resume      Resume?      @relation(fields: [resumeId], references: [id])
   resumeId    String?
+  EmailImport EmailImport?
 }
 
 model ActivityType {
@@ -300,4 +303,51 @@ model Task {
   @@index([userId, status])
   @@index([userId, activityTypeId])
   @@index([userId, dueDate])
+}
+
+model EmailAccount {
+  id           String        @id @default(uuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id])
+  email        String        @unique
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  EmailImports EmailImport[]
+}
+
+model EmailImport {
+  id             String       @id @default(uuid())
+  userId         String
+  user           User         @relation(fields: [userId], references: [id])
+  emailAccountId String
+  emailAccount   EmailAccount @relation(fields: [emailAccountId], references: [id])
+
+  // Email metadata
+  messageId String   @unique
+  subject   String
+  fromEmail String
+  fromName  String?
+  toEmail   String
+  emailDate DateTime
+  bodyText  String?
+  bodyHtml  String?
+
+  // Classification results from Ollama
+  classification String // job_application, job_response, interview, rejection, offer, other
+  confidence     Float
+  isOutbound     Boolean @default(false)
+  extractedData  String? // JSON: { company, jobTitle, location, applicationUrl, etc. }
+
+  // Review status
+  status     String    @default("pending") // pending, approved, rejected, skipped
+  reviewedAt DateTime?
+  jobId      String?   @unique
+  job        Job?      @relation(fields: [jobId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, status])
+  @@index([userId, classification])
+  @@index([emailDate])
 }
