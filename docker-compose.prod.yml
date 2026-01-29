@@ -1,0 +1,27 @@
+services:
+  app:
+    container_name: jobsync
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:3000:3000"  # Only expose to localhost (nginx will proxy)
+    env_file:
+      - .env.production
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=file:/data/dev.db
+    volumes:
+      - ./data:/data           # SQLite database persisted on host
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/email-sync"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
