@@ -28,15 +28,37 @@ const MONITORED_EMAILS = (
 ).split(",");
 
 const LOG_FILE = path.join(process.env.HOME || "~", ".jobsync", "local-sync.log");
+const IS_TTY = process.stdout.isTTY;
 
 function log(message) {
   const timestamp = new Date().toISOString();
   const logMessage = `[${timestamp}] ${message}`;
-  console.log(logMessage);
+
+  // Only write to file (avoid duplicates when stdout is redirected to same file)
   try {
     fs.appendFileSync(LOG_FILE, logMessage + "\n");
   } catch (e) {
     // ignore
+  }
+
+  // Only write to console if running interactively
+  if (IS_TTY) {
+    console.log(logMessage);
+  }
+}
+
+function progressBar(current, total, width = 30) {
+  const percent = total > 0 ? current / total : 0;
+  const filled = Math.round(width * percent);
+  const empty = width - filled;
+  const bar = "█".repeat(filled) + "░".repeat(empty);
+  return `[${bar}] ${current}/${total} (${(percent * 100).toFixed(0)}%)`;
+}
+
+function updateProgress(current, total, message = "") {
+  if (IS_TTY) {
+    // Clear line and show progress
+    process.stdout.write(`\r${progressBar(current, total)} ${message}`.padEnd(100));
   }
 }
 
@@ -213,15 +235,22 @@ async function main() {
   const toSend = [];
   let processed = 0;
   let skipped = 0;
+  let jobRelated = 0;
+  const total = emailPaths.length;
 
-  for (const filePath of emailPaths) {
+  for (let i = 0; i < emailPaths.length; i++) {
+    const filePath = emailPaths[i];
     const parsed = await parseEmailFile(filePath);
     if (!parsed) {
       skipped++;
+      updateProgress(i + 1, total, "Parse failed");
       continue;
     }
 
+    const shortSubject = parsed.subject.substring(0, 40).replace(/\n/g, " ");
+    updateProgress(i + 1, total, shortSubject);
     log(`Classifying: ${parsed.subject.substring(0, 50)}...`);
+
     const classification = await classifyWithOllama(parsed);
     if (!classification) {
       log(`  -> Classification failed (Ollama not running?), will retry later`);
@@ -256,9 +285,15 @@ async function main() {
 
     await markEmailProcessed(parsed.messageId);
     processed++;
+    jobRelated++;
   }
 
-  log(`Processed ${processed}, skipped ${skipped}`);
+  // Clear progress line
+  if (IS_TTY) {
+    process.stdout.write("\r" + " ".repeat(100) + "\r");
+  }
+
+  log(`Processed ${processed}, skipped ${skipped}, job-related: ${jobRelated}`);
 
   if (toSend.length > 0) {
     log(`Sending ${toSend.length} emails to server...`);
