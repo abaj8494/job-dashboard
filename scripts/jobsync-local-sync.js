@@ -26,6 +26,7 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
 const MONITORED_EMAILS = (
   process.env.MONITORED_EMAILS || "j@abaj.ai,aayushbajaj7@gmail.com"
 ).split(",");
+const CONCURRENCY = parseInt(process.env.JOBSYNC_CONCURRENCY || "4", 10);
 
 const LOG_FILE = path.join(process.env.HOME || "~", ".jobsync", "local-sync.log");
 const IS_TTY = process.stdout.isTTY;
@@ -60,6 +61,38 @@ function updateProgress(current, total, message = "") {
     // Clear line and show progress
     process.stdout.write(`\r${progressBar(current, total)} ${message}`.padEnd(100));
   }
+}
+
+/**
+ * Run async tasks with limited concurrency
+ */
+async function runWithConcurrency(items, fn, concurrency) {
+  const results = [];
+  let index = 0;
+  let completed = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const currentIndex = index++;
+      const item = items[currentIndex];
+      try {
+        const result = await fn(item, currentIndex, items.length);
+        results[currentIndex] = result;
+      } catch (error) {
+        results[currentIndex] = { error };
+      }
+      completed++;
+    }
+  }
+
+  // Start workers
+  const workers = [];
+  for (let i = 0; i < Math.min(concurrency, items.length); i++) {
+    workers.push(worker());
+  }
+
+  await Promise.all(workers);
+  return results;
 }
 
 async function queryNewEmails() {
@@ -226,6 +259,48 @@ async function sendToServer(imports) {
   }
 }
 
+async function processOneEmail(filePath, index, total) {
+  const parsed = await parseEmailFile(filePath);
+  if (!parsed) {
+    return { status: "parse_failed" };
+  }
+
+  const shortSubject = parsed.subject.substring(0, 40).replace(/\n/g, " ");
+  log(`[${index + 1}/${total}] Classifying: ${shortSubject}...`);
+
+  const classification = await classifyWithOllama(parsed);
+  if (!classification) {
+    log(`[${index + 1}/${total}]   -> Classification failed, will retry later`);
+    return { status: "classify_failed" };
+  }
+
+  log(`[${index + 1}/${total}]   -> ${classification.type} (${(classification.confidence * 100).toFixed(0)}%)`);
+
+  if (!isJobRelated(classification) || classification.confidence < 0.6) {
+    await markEmailProcessed(parsed.messageId);
+    return { status: "skipped", reason: "not job-related" };
+  }
+
+  await markEmailProcessed(parsed.messageId);
+  return {
+    status: "job_related",
+    data: {
+      messageId: parsed.messageId,
+      subject: parsed.subject,
+      fromEmail: parsed.from,
+      fromName: parsed.fromName,
+      toEmail: parsed.to,
+      emailDate: parsed.date.toISOString(),
+      bodyText: (parsed.textBody || "").substring(0, 10000),
+      bodyHtml: (parsed.htmlBody || "").substring(0, 50000),
+      classification: classification.type,
+      confidence: classification.confidence,
+      isOutbound: parsed.isOutbound,
+      extractedData: classification.extractedData,
+    },
+  };
+}
+
 async function main() {
   // Ensure log directory exists
   const logDir = path.dirname(LOG_FILE);
@@ -241,78 +316,45 @@ async function main() {
   }
 
   log(`API URL: ${JOBSYNC_API_URL}`);
+  log(`Concurrency: ${CONCURRENCY}`);
 
   // Query for new emails
   const emailPaths = await queryNewEmails();
-  log(`Found ${emailPaths.length} new emails`);
 
   if (emailPaths.length === 0) {
     log("No new emails to process");
     return;
   }
 
+  log(`Processing ${emailPaths.length} emails with ${CONCURRENCY} concurrent workers...`);
+
+  // Process all emails with concurrency
+  const results = await runWithConcurrency(
+    emailPaths,
+    processOneEmail,
+    CONCURRENCY
+  );
+
+  // Aggregate results
   const toSend = [];
-  let processed = 0;
   let skipped = 0;
+  let failed = 0;
   let jobRelated = 0;
-  const total = emailPaths.length;
 
-  for (let i = 0; i < emailPaths.length; i++) {
-    const filePath = emailPaths[i];
-    const parsed = await parseEmailFile(filePath);
-    if (!parsed) {
+  for (const result of results) {
+    if (result.error) {
+      failed++;
+    } else if (result.status === "job_related") {
+      toSend.push(result.data);
+      jobRelated++;
+    } else if (result.status === "classify_failed") {
+      failed++;
+    } else {
       skipped++;
-      updateProgress(i + 1, total, "Parse failed");
-      continue;
     }
-
-    const shortSubject = parsed.subject.substring(0, 40).replace(/\n/g, " ");
-    updateProgress(i + 1, total, shortSubject);
-    log(`Classifying: ${parsed.subject.substring(0, 50)}...`);
-
-    const classification = await classifyWithOllama(parsed);
-    if (!classification) {
-      log(`  -> Classification failed (Ollama not running?), will retry later`);
-      skipped++;
-      // DON'T mark as processed - leave for retry when Ollama is available
-      continue;
-    }
-
-    log(`  -> ${classification.type} (${(classification.confidence * 100).toFixed(0)}%)`);
-
-    if (!isJobRelated(classification) || classification.confidence < 0.6) {
-      log(`  -> Skipping (not job-related or low confidence)`);
-      await markEmailProcessed(parsed.messageId);
-      skipped++;
-      continue;
-    }
-
-    toSend.push({
-      messageId: parsed.messageId,
-      subject: parsed.subject,
-      fromEmail: parsed.from,
-      fromName: parsed.fromName,
-      toEmail: parsed.to,
-      emailDate: parsed.date.toISOString(),
-      bodyText: (parsed.textBody || "").substring(0, 10000),
-      bodyHtml: (parsed.htmlBody || "").substring(0, 50000),
-      classification: classification.type,
-      confidence: classification.confidence,
-      isOutbound: parsed.isOutbound,
-      extractedData: classification.extractedData,
-    });
-
-    await markEmailProcessed(parsed.messageId);
-    processed++;
-    jobRelated++;
   }
 
-  // Clear progress line
-  if (IS_TTY) {
-    process.stdout.write("\r" + " ".repeat(100) + "\r");
-  }
-
-  log(`Processed ${processed}, skipped ${skipped}, job-related: ${jobRelated}`);
+  log(`Results: ${jobRelated} job-related, ${skipped} skipped, ${failed} failed`);
 
   if (toSend.length > 0) {
     log(`Sending ${toSend.length} emails to server...`);
