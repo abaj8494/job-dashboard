@@ -67,11 +67,30 @@ async function queryNewEmails() {
     (email) => `(from:${email} OR to:${email})`
   ).join(" OR ");
 
-  const query = `tag:new AND (${emailClauses}) AND NOT tag:spam AND NOT tag:trash AND NOT tag:jobsync-processed`;
+  // Exclude spam, trash, junk folders (explicit folder paths for abaj account)
+  const query = `tag:new AND (${emailClauses}) AND NOT tag:spam AND NOT tag:trash AND NOT folder:abaj/Trash AND NOT folder:abaj/Junk AND NOT tag:jobsync-processed`;
 
   try {
-    const { stdout } = await execAsync(`notmuch search --output=files "${query}"`);
-    return stdout.trim().split("\n").filter(Boolean);
+    // Use --output=messages to get unique message IDs (avoids duplicates from multiple files)
+    const { stdout: messageIds } = await execAsync(`notmuch search --output=messages "${query}"`, { maxBuffer: 10 * 1024 * 1024 });
+    const ids = messageIds.trim().split("\n").filter(Boolean);
+
+    if (ids.length === 0) return [];
+
+    // Get one file path per unique message
+    const filePaths = [];
+    for (const msgId of ids) {
+      try {
+        const { stdout: files } = await execAsync(`notmuch search --output=files '${msgId}'`);
+        const firstFile = files.trim().split("\n")[0];
+        if (firstFile) filePaths.push(firstFile);
+      } catch (e) {
+        // Skip if can't get file for this message
+      }
+    }
+
+    log(`Found ${ids.length} unique messages`);
+    return filePaths;
   } catch (error) {
     log(`Notmuch query failed: ${error.message}`);
     return [];
