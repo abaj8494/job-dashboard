@@ -222,10 +222,12 @@ ${(email.textBody || "(No text body)").substring(0, 3000)}`;
 
 async function markEmailProcessed(messageId) {
   try {
-    const escapedId = messageId.replace(/'/g, "'\\''");
+    // Strip angle brackets if present (mailparser includes them, notmuch doesn't want them)
+    const cleanId = messageId.replace(/^<|>$/g, "");
+    const escapedId = cleanId.replace(/'/g, "'\\''");
     await execAsync(`notmuch tag -new +jobsync-processed -- 'id:${escapedId}'`);
   } catch (error) {
-    log(`Failed to tag email: ${error.message}`);
+    log(`Failed to tag email ${messageId}: ${error.message}`);
   }
 }
 
