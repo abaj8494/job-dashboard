@@ -25,9 +25,16 @@ import {
   SkipForward,
   Mail,
   Send,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 import { format } from "date-fns";
-import { type EmailImportListItem } from "@/actions/email-import.actions";
+import {
+  type EmailImportListItem,
+  type EmailImportSortField,
+  type SortOrder,
+} from "@/actions/email-import.actions";
 import {
   rejectEmailImport,
   skipEmailImport,
@@ -41,6 +48,38 @@ interface EmailImportsTableProps {
   imports: EmailImportListItem[];
   onReview: (emailImport: EmailImportListItem) => void;
   onRefresh: () => void;
+  sortBy: EmailImportSortField;
+  sortOrder: SortOrder;
+  onSort: (field: EmailImportSortField) => void;
+}
+
+interface SortableHeaderProps {
+  field: EmailImportSortField;
+  label: string;
+  currentSort: EmailImportSortField;
+  sortOrder: SortOrder;
+  onSort: (field: EmailImportSortField) => void;
+}
+
+function SortableHeader({ field, label, currentSort, sortOrder, onSort }: SortableHeaderProps) {
+  const isActive = currentSort === field;
+  return (
+    <button
+      onClick={() => onSort(field)}
+      className="flex items-center gap-1 hover:text-foreground transition-colors"
+    >
+      {label}
+      {isActive ? (
+        sortOrder === "asc" ? (
+          <ArrowUp className="h-3 w-3" />
+        ) : (
+          <ArrowDown className="h-3 w-3" />
+        )
+      ) : (
+        <ArrowUpDown className="h-3 w-3 opacity-50" />
+      )}
+    </button>
+  );
 }
 
 const CLASSIFICATION_LABELS: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
@@ -60,7 +99,7 @@ const STATUS_BADGES: Record<string, { label: string; variant: "default" | "secon
   skipped: { label: "Skipped", variant: "secondary" },
 };
 
-function EmailImportsTable({ imports, onReview, onRefresh }: EmailImportsTableProps) {
+function EmailImportsTable({ imports, onReview, onRefresh, sortBy, sortOrder, onSort }: EmailImportsTableProps) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
 
@@ -191,13 +230,25 @@ function EmailImportsTable({ imports, onReview, onRefresh }: EmailImportsTablePr
                 disabled={pendingImports.length === 0}
               />
             </TableHead>
-            <TableHead>Date</TableHead>
+            <TableHead>
+              <SortableHeader field="emailDate" label="Date" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
             <TableHead>Direction</TableHead>
-            <TableHead>From / To</TableHead>
-            <TableHead>Subject</TableHead>
-            <TableHead>Type</TableHead>
-            <TableHead>Confidence</TableHead>
-            <TableHead>Status</TableHead>
+            <TableHead>
+              <SortableHeader field="fromEmail" label="From / To" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
+            <TableHead>
+              <SortableHeader field="subject" label="Subject" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
+            <TableHead>
+              <SortableHeader field="classification" label="Type" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
+            <TableHead>
+              <SortableHeader field="confidence" label="Confidence" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
+            <TableHead>
+              <SortableHeader field="status" label="Status" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
             <TableHead className="w-12"></TableHead>
           </TableRow>
         </TableHeader>

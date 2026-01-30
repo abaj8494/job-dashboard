@@ -29,6 +29,9 @@ export interface EmailImportListItem {
   } | null;
 }
 
+export type EmailImportSortField = "emailDate" | "subject" | "fromEmail" | "classification" | "confidence" | "status";
+export type SortOrder = "asc" | "desc";
+
 /**
  * Get paginated list of email imports
  */
@@ -36,7 +39,9 @@ export const getEmailImportsList = async (
   page: number = 1,
   limit: number = APP_CONSTANTS.RECORDS_PER_PAGE,
   status?: string,
-  classification?: string
+  classification?: string,
+  sortBy: EmailImportSortField = "emailDate",
+  sortOrder: SortOrder = "desc"
 ): Promise<{ success: boolean; data?: EmailImportListItem[]; total?: number; message?: string } | undefined> => {
   try {
     const user = await getCurrentUser();
@@ -60,7 +65,7 @@ export const getEmailImportsList = async (
         where,
         skip,
         take: limit,
-        orderBy: { emailDate: "desc" },
+        orderBy: { [sortBy]: sortOrder },
         include: {
           emailAccount: {
             select: { email: true },

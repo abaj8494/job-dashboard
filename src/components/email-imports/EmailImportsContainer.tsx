@@ -12,6 +12,8 @@ import { Mail, RefreshCw, ListFilter } from "lucide-react";
 import {
   getEmailImportsList,
   type EmailImportListItem,
+  type EmailImportSortField,
+  type SortOrder,
 } from "@/actions/email-import.actions";
 import { toast } from "../ui/use-toast";
 import {
@@ -80,19 +82,25 @@ function EmailImportsContainer({
   const [recordsPerPage, setRecordsPerPage] = useState<number>(
     APP_CONSTANTS.RECORDS_PER_PAGE
   );
+  const [sortBy, setSortBy] = useState<EmailImportSortField>("emailDate");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
 
   const loadImports = useCallback(
     async (
       pageNum: number,
       status?: string,
-      classification?: string
+      classification?: string,
+      sort: EmailImportSortField = sortBy,
+      order: SortOrder = sortOrder
     ) => {
       setLoading(true);
       const result = await getEmailImportsList(
         pageNum,
         recordsPerPage,
         status,
-        classification
+        classification,
+        sort,
+        order
       );
       if (result?.success && result?.data) {
         setImports((prev) => (pageNum === 1 ? result.data! : [...prev, ...result.data!]));
@@ -107,7 +115,7 @@ function EmailImportsContainer({
       }
       setLoading(false);
     },
-    [recordsPerPage]
+    [recordsPerPage, sortBy, sortOrder]
   );
 
   useEffect(() => {
@@ -129,7 +137,16 @@ function EmailImportsContainer({
   const handleRefresh = () => {
     setPage(1);
     setImports([]);
-    loadImports(1, statusFilter, classificationFilter);
+    loadImports(1, statusFilter, classificationFilter, sortBy, sortOrder);
+  };
+
+  const handleSort = (field: EmailImportSortField) => {
+    const newOrder = sortBy === field && sortOrder === "desc" ? "asc" : "desc";
+    setSortBy(field);
+    setSortOrder(newOrder);
+    setPage(1);
+    setImports([]);
+    loadImports(1, statusFilter, classificationFilter, field, newOrder);
   };
 
   const handleReview = (emailImport: EmailImportListItem) => {
@@ -144,7 +161,7 @@ function EmailImportsContainer({
   };
 
   const handleLoadMore = () => {
-    loadImports(page + 1, statusFilter, classificationFilter);
+    loadImports(page + 1, statusFilter, classificationFilter, sortBy, sortOrder);
   };
 
   const handleRecordsPerPageChange = (value: number) => {
@@ -242,6 +259,9 @@ function EmailImportsContainer({
               imports={imports}
               onReview={handleReview}
               onRefresh={handleRefresh}
+              sortBy={sortBy}
+              sortOrder={sortOrder}
+              onSort={handleSort}
             />
           )}
         </CardContent>

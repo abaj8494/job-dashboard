@@ -546,17 +546,17 @@ function EmailImportReview({
 
           <TabsContent value="email" className="mt-4">
             <ScrollArea className="h-[400px]">
-              <div className="space-y-4">
+              <div className="space-y-4 pr-4">
                 <div className="bg-muted p-4 rounded-lg">
-                  <p className="font-medium mb-2">{emailImport.subject}</p>
+                  <p className="font-medium mb-2 break-words">{emailImport.subject}</p>
                   <div className="text-sm text-muted-foreground space-y-1">
-                    <p>From: {emailImport.fromName || emailImport.fromEmail}</p>
-                    <p>To: {emailImport.toEmail}</p>
+                    <p className="break-all">From: {emailImport.fromName || emailImport.fromEmail}</p>
+                    <p className="break-all">To: {emailImport.toEmail}</p>
                     <p>Date: {format(new Date(emailImport.emailDate), "PPPp")}</p>
                   </div>
                 </div>
                 <Separator />
-                <div className="whitespace-pre-wrap text-sm">
+                <div className="whitespace-pre-wrap text-sm break-words overflow-hidden">
                   {emailImport.bodyText || "(No text content)"}
                 </div>
               </div>
