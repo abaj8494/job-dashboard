@@ -336,6 +336,102 @@ async function handleLocalMode(userId: string): Promise<NextResponse> {
 }
 
 /**
+ * PATCH /api/email-sync
+ *
+ * Update classifications from user corrections.
+ * Called by the corrections scanner when user changes tags in notmuch.
+ *
+ * Body: { corrections: [{ messageId, originalType, correctedType }] }
+ */
+export const PATCH = async (req: NextRequest) => {
+  // Verify API key
+  const authHeader = req.headers.get("x-api-key");
+  if (!API_KEY) {
+    return NextResponse.json(
+      { error: "EMAIL_SYNC_API_KEY not configured" },
+      { status: 500 }
+    );
+  }
+  if (authHeader !== API_KEY) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  try {
+    const body = await req.json();
+    const corrections = body.corrections as Array<{
+      messageId: string;
+      originalType: string;
+      correctedType: string;
+    }>;
+
+    if (!corrections || !Array.isArray(corrections)) {
+      return NextResponse.json(
+        { error: "Invalid request body - expected { corrections: [...] }" },
+        { status: 400 }
+      );
+    }
+
+    let updated = 0;
+    let notFound = 0;
+    const errors: string[] = [];
+
+    for (const correction of corrections) {
+      try {
+        // Clean message ID (remove angle brackets if present)
+        const cleanMessageId = correction.messageId.replace(/^<|>$/g, "");
+
+        // Try to find the email import by messageId
+        const emailImport = await prisma.emailImport.findFirst({
+          where: {
+            OR: [
+              { messageId: cleanMessageId },
+              { messageId: `<${cleanMessageId}>` },
+              { messageId: correction.messageId },
+            ],
+          },
+        });
+
+        if (!emailImport) {
+          notFound++;
+          continue;
+        }
+
+        // Update the classification
+        await prisma.emailImport.update({
+          where: { id: emailImport.id },
+          data: {
+            classification: correction.correctedType,
+            // Optionally track that this was user-corrected
+            updatedAt: new Date(),
+          },
+        });
+
+        updated++;
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : "Unknown error";
+        errors.push(
+          `Error updating ${correction.messageId}: ${errorMessage}`
+        );
+      }
+    }
+
+    return NextResponse.json({
+      message: "Corrections applied",
+      updated,
+      notFound,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error) {
+    console.error("Correction sync error:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Correction sync failed" },
+      { status: 500 }
+    );
+  }
+};
+
+/**
  * GET /api/email-sync
  *
  * Get pending email import count (for dashboard indicator)

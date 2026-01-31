@@ -28,8 +28,21 @@ const MONITORED_EMAILS = (
 ).split(",");
 const CONCURRENCY = parseInt(process.env.JOBSYNC_CONCURRENCY || "4", 10);
 
-const LOG_FILE = path.join(process.env.HOME || "~", ".jobsync", "local-sync.log");
+const JOBSYNC_DIR = path.join(process.env.HOME || "~", ".jobsync");
+const LOG_FILE = path.join(JOBSYNC_DIR, "local-sync.log");
+const CORRECTIONS_FILE = path.join(JOBSYNC_DIR, "corrections.json");
 const IS_TTY = process.stdout.isTTY;
+
+// Valid classification types
+const CLASSIFICATION_TYPES = [
+  "job_application",
+  "job_response",
+  "interview",
+  "rejection",
+  "offer",
+  "follow_up",
+  "other"
+];
 
 function log(message) {
   const timestamp = new Date().toISOString();
@@ -61,6 +74,53 @@ function updateProgress(current, total, message = "") {
     // Clear line and show progress
     process.stdout.write(`\r${progressBar(current, total)} ${message}`.padEnd(100));
   }
+}
+
+/**
+ * Load corrections from file (user-corrected classifications)
+ */
+function loadCorrections() {
+  try {
+    if (fs.existsSync(CORRECTIONS_FILE)) {
+      const data = fs.readFileSync(CORRECTIONS_FILE, "utf-8");
+      return JSON.parse(data);
+    }
+  } catch (e) {
+    log(`Failed to load corrections: ${e.message}`);
+  }
+  return { corrections: [], lastScan: null };
+}
+
+/**
+ * Save corrections to file
+ */
+function saveCorrections(data) {
+  try {
+    fs.writeFileSync(CORRECTIONS_FILE, JSON.stringify(data, null, 2));
+  } catch (e) {
+    log(`Failed to save corrections: ${e.message}`);
+  }
+}
+
+/**
+ * Build few-shot examples from recent corrections
+ */
+function buildFewShotExamples(corrections, maxExamples = 5) {
+  if (!corrections || corrections.length === 0) return "";
+
+  // Get most recent corrections
+  const recent = corrections.slice(-maxExamples);
+
+  const examples = recent.map((c, i) => {
+    return `Example ${i + 1} (CORRECTED - was "${c.originalType}", should be "${c.correctedType}"):
+Subject: ${c.subject}
+From: ${c.from}
+Direction: ${c.isOutbound ? "SENT" : "RECEIVED"}
+Body preview: ${(c.bodyPreview || "").substring(0, 500)}
+CORRECT classification: ${c.correctedType}`;
+  }).join("\n\n");
+
+  return `\n\nHere are some examples of previous corrections to learn from:\n${examples}\n\nNow classify the following email:`;
 }
 
 /**
@@ -164,7 +224,7 @@ async function parseEmailFile(filePath) {
   }
 }
 
-async function classifyWithOllama(email) {
+async function classifyWithOllama(email, corrections = []) {
   const systemPrompt = `You are an email classifier for job search tracking. Classify emails into one of these categories:
 - job_application: Email SENT BY the user applying for a job
 - job_response: Company acknowledging receipt of application
@@ -179,7 +239,10 @@ Also extract: company name, job title, location, application URL, recruiter name
 Respond ONLY with valid JSON in this exact format:
 {"type":"category","confidence":0.95,"extractedData":{"company":"Name","jobTitle":"Title","location":"City","applicationUrl":"url","recruiterName":"Name","salaryRange":"range"}}`;
 
-  const userPrompt = `Classify this email:
+  // Add few-shot examples from corrections if available
+  const fewShotExamples = buildFewShotExamples(corrections);
+
+  const userPrompt = `${fewShotExamples}
 
 Direction: ${email.isOutbound ? "SENT" : "RECEIVED"}
 From: ${email.fromName || email.from}
@@ -220,12 +283,19 @@ ${(email.textBody || "(No text body)").substring(0, 3000)}`;
   }
 }
 
-async function markEmailProcessed(messageId) {
+async function markEmailProcessed(messageId, classificationType = null) {
   try {
     // Strip angle brackets if present (mailparser includes them, notmuch doesn't want them)
     const cleanId = messageId.replace(/^<|>$/g, "");
     const escapedId = cleanId.replace(/'/g, "'\\''");
-    await execAsync(`notmuch tag -new +jobsync-processed -- 'id:${escapedId}'`);
+
+    // Build tag command: remove 'new', add 'jobsync-processed', add classification tag
+    let tagCmd = "-new +jobsync-processed";
+    if (classificationType && CLASSIFICATION_TYPES.includes(classificationType)) {
+      tagCmd += ` +jobsync/${classificationType}`;
+    }
+
+    await execAsync(`notmuch tag ${tagCmd} -- 'id:${escapedId}'`);
   } catch (error) {
     log(`Failed to tag email ${messageId}: ${error.message}`);
   }
@@ -261,7 +331,7 @@ async function sendToServer(imports) {
   }
 }
 
-async function processOneEmail(filePath, index, total) {
+async function processOneEmail(filePath, index, total, corrections = []) {
   const parsed = await parseEmailFile(filePath);
   if (!parsed) {
     return { status: "parse_failed" };
@@ -270,7 +340,7 @@ async function processOneEmail(filePath, index, total) {
   const shortSubject = parsed.subject.substring(0, 40).replace(/\n/g, " ");
   log(`[${index + 1}/${total}] Classifying: ${shortSubject}...`);
 
-  const classification = await classifyWithOllama(parsed);
+  const classification = await classifyWithOllama(parsed, corrections);
   if (!classification) {
     log(`[${index + 1}/${total}]   -> Classification failed, will retry later`);
     return { status: "classify_failed" };
@@ -279,11 +349,11 @@ async function processOneEmail(filePath, index, total) {
   log(`[${index + 1}/${total}]   -> ${classification.type} (${(classification.confidence * 100).toFixed(0)}%)`);
 
   if (!isJobRelated(classification) || classification.confidence < 0.6) {
-    await markEmailProcessed(parsed.messageId);
+    await markEmailProcessed(parsed.messageId, classification.type);
     return { status: "skipped", reason: "not job-related" };
   }
 
-  await markEmailProcessed(parsed.messageId);
+  await markEmailProcessed(parsed.messageId, classification.type);
   return {
     status: "job_related",
     data: {
@@ -320,6 +390,13 @@ async function main() {
   log(`API URL: ${JOBSYNC_API_URL}`);
   log(`Concurrency: ${CONCURRENCY}`);
 
+  // Load corrections for few-shot learning
+  const correctionsData = loadCorrections();
+  const corrections = correctionsData.corrections || [];
+  if (corrections.length > 0) {
+    log(`Loaded ${corrections.length} corrections for few-shot learning`);
+  }
+
   // Query for new emails
   const emailPaths = await queryNewEmails();
 
@@ -330,10 +407,10 @@ async function main() {
 
   log(`Processing ${emailPaths.length} emails with ${CONCURRENCY} concurrent workers...`);
 
-  // Process all emails with concurrency
+  // Process all emails with concurrency (pass corrections to each worker)
   const results = await runWithConcurrency(
     emailPaths,
-    processOneEmail,
+    (filePath, index, total) => processOneEmail(filePath, index, total, corrections),
     CONCURRENCY
   );
 
