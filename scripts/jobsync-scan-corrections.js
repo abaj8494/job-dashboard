@@ -9,14 +9,14 @@
  *   node scripts/jobsync-scan-corrections.js
  *
  * How it works:
- * 1. Queries notmuch for emails with jobsync-processed tag
- * 2. Checks if the current jobsync/* tag differs from what we originally assigned
- * 3. If user changed the tag, records it as a correction
+ * 1. Queries notmuch for emails with jobsync-was/* tag (indicates a correction)
+ * 2. Compares jobsync-was/<original> with current jobsync/<type>
+ * 3. Syncs corrections to server and records high-variance ones for few-shot learning
  *
  * The user workflow:
  * 1. Email is classified as "rejection" -> tagged with jobsync/rejection
- * 2. User sees this is wrong, removes jobsync/rejection, adds jobsync/interview
- * 3. This script detects the change and records the correction
+ * 2. User presses J to rotate: adds jobsync-was/rejection (original), changes to jobsync/interview
+ * 3. This script detects the change and syncs it to the server
  */
 
 const { exec } = require("child_process");

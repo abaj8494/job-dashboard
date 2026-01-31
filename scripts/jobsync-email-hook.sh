@@ -37,7 +37,8 @@ if [ -z "$JOBSYNC_API_KEY" ]; then
 fi
 
 # Check if there are any new emails for monitored accounts
-NEW_COUNT=$(notmuch count 'tag:new AND (from:j@abaj.ai OR to:j@abaj.ai OR from:aayushbajaj7@gmail.com OR to:aayushbajaj7@gmail.com) AND NOT tag:spam AND NOT tag:trash AND NOT tag:jobsync-processed' 2>/dev/null)
+# An email is "processed" if it has any jobsync/* classification tag
+NEW_COUNT=$(notmuch count 'tag:new AND (from:j@abaj.ai OR to:j@abaj.ai OR from:aayushbajaj7@gmail.com OR to:aayushbajaj7@gmail.com) AND NOT tag:spam AND NOT tag:trash AND NOT (tag:jobsync/job_application OR tag:jobsync/job_response OR tag:jobsync/interview OR tag:jobsync/rejection OR tag:jobsync/offer OR tag:jobsync/follow_up OR tag:jobsync/other)' 2>/dev/null)
 
 if [ -z "$NEW_COUNT" ] || [ "$NEW_COUNT" -eq 0 ]; then
     log "No new emails for monitored accounts"

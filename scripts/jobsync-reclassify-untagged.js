@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /**
- * Re-classify Untagged Emails Script
+ * Classify Untagged Emails Script
  *
- * Finds emails with jobsync-processed but no jobsync/* classification tag
- * and re-classifies them with Ollama.
+ * Finds monitored emails that don't have any jobsync/* classification tag
+ * and classifies them with rules + Ollama.
+ *
+ * Useful for backfilling old emails or catching any that were missed.
  *
  * Usage:
  *   node scripts/jobsync-reclassify-untagged.js
@@ -64,11 +66,15 @@ CORRECT classification: ${c.correctedType}`;
 }
 
 async function queryUntaggedEmails() {
+  // Find monitored emails that don't have any jobsync/* classification tag
+  const emailClauses = MONITORED_EMAILS.map(
+    (email) => `(from:${email} OR to:${email})`
+  ).join(" OR ");
   const classificationTags = CLASSIFICATION_TYPES
     .map(t => `tag:jobsync/${t}`)
     .join(" OR ");
 
-  const query = `tag:jobsync-processed AND NOT (${classificationTags})`;
+  const query = `(${emailClauses}) AND NOT tag:spam AND NOT tag:trash AND NOT (${classificationTags})`;
 
   try {
     const { stdout } = await execAsync(

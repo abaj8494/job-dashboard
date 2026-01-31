@@ -152,8 +152,10 @@ async function queryNewEmails() {
     (email) => `(from:${email} OR to:${email})`
   ).join(" OR ");
 
-  // Exclude spam, trash, junk folders (explicit folder paths for abaj account)
-  const query = `tag:new AND (${emailClauses}) AND NOT tag:spam AND NOT tag:trash AND NOT folder:abaj/Trash AND NOT folder:abaj/Junk AND NOT tag:jobsync-processed`;
+  // Exclude spam, trash, junk folders and already-classified emails
+  // An email is "processed" if it has any jobsync/<type> tag
+  const classificationTags = CLASSIFICATION_TYPES.map(t => `tag:jobsync/${t}`).join(" OR ");
+  const query = `tag:new AND (${emailClauses}) AND NOT tag:spam AND NOT tag:trash AND NOT folder:abaj/Trash AND NOT folder:abaj/Junk AND NOT (${classificationTags})`;
 
   try {
     // Use --output=messages to get unique message IDs (avoids duplicates from multiple files)
@@ -281,8 +283,9 @@ async function markEmailProcessed(messageId, classificationType = null) {
     const cleanId = messageId.replace(/^<|>$/g, "");
     const escapedId = cleanId.replace(/'/g, "'\\''");
 
-    // Build tag command: remove 'new', add 'jobsync-processed', add classification tag
-    let tagCmd = "-new +jobsync-processed";
+    // Build tag command: remove 'new', add classification tag
+    // The jobsync/<type> tag itself indicates the email has been processed
+    let tagCmd = "-new";
     if (classificationType && CLASSIFICATION_TYPES.includes(classificationType)) {
       tagCmd += ` +jobsync/${classificationType}`;
     }
