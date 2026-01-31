@@ -48,7 +48,7 @@ import { toast } from "../ui/use-toast";
 
 interface EmailImportsTableProps {
   imports: EmailImportListItem[];
-  onReview: (emailImport: EmailImportListItem) => void;
+  onReview: (emailImport: EmailImportListItem, selectedIds?: string[]) => void;
   onRefresh: () => void;
   sortBy: EmailImportSortField;
   sortOrder: SortOrder;
@@ -216,11 +216,25 @@ function EmailImportsTable({ imports, onReview, onRefresh, sortBy, sortOrder, on
           <Button
             variant="outline"
             size="sm"
+            onClick={() => {
+              const selectedImports = imports.filter((i) => selectedIds.has(i.id));
+              if (selectedImports.length > 0) {
+                onReview(selectedImports[0], Array.from(selectedIds));
+              }
+            }}
+            disabled={loading}
+          >
+            <Eye className="h-4 w-4 mr-1" />
+            Review Selected
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={handleBulkSkip}
             disabled={loading}
           >
             <SkipForward className="h-4 w-4 mr-1" />
-            Skip All
+            Skip Selected
           </Button>
           <Button
             variant="outline"
@@ -229,7 +243,7 @@ function EmailImportsTable({ imports, onReview, onRefresh, sortBy, sortOrder, on
             disabled={loading}
           >
             <XCircle className="h-4 w-4 mr-1" />
-            Reject All
+            Reject Selected
           </Button>
         </div>
       )}
@@ -272,8 +286,19 @@ function EmailImportsTable({ imports, onReview, onRefresh, sortBy, sortOrder, on
             const statusInfo = STATUS_BADGES[emailImport.status] || STATUS_BADGES.pending;
 
             return (
-              <TableRow key={emailImport.id}>
-                <TableCell>
+              <TableRow
+                key={emailImport.id}
+                className="cursor-pointer hover:bg-muted/50"
+                onClick={(e) => {
+                  // Don't open review if user is selecting text
+                  const selection = window.getSelection();
+                  if (selection && selection.toString().length > 0) {
+                    return;
+                  }
+                  onReview(emailImport);
+                }}
+              >
+                <TableCell onClick={(e) => e.stopPropagation()}>
                   <Checkbox
                     checked={selectedIds.has(emailImport.id)}
                     onCheckedChange={(checked: boolean) =>
@@ -319,7 +344,7 @@ function EmailImportsTable({ imports, onReview, onRefresh, sortBy, sortOrder, on
                     {statusInfo.label}
                   </Badge>
                 </TableCell>
-                <TableCell>
+                <TableCell onClick={(e) => e.stopPropagation()}>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon">

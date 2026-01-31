@@ -79,6 +79,7 @@ function EmailImportsContainer({
   const [loading, setLoading] = useState(false);
   const [selectedImport, setSelectedImport] = useState<EmailImportListItem | null>(null);
   const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState<string[]>([]);
   const [recordsPerPage, setRecordsPerPage] = useState<number>(
     APP_CONSTANTS.RECORDS_PER_PAGE
   );
@@ -149,15 +150,38 @@ function EmailImportsContainer({
     loadImports(1, statusFilter, classificationFilter, field, newOrder);
   };
 
-  const handleReview = (emailImport: EmailImportListItem) => {
+  const handleReview = (emailImport: EmailImportListItem, selectedIds?: string[]) => {
     setSelectedImport(emailImport);
+    setReviewQueue(selectedIds || []);
     setReviewDialogOpen(true);
   };
 
   const handleReviewComplete = () => {
     setReviewDialogOpen(false);
     setSelectedImport(null);
+    setReviewQueue([]);
     handleRefresh();
+  };
+
+  const handleReviewNext = () => {
+    if (reviewQueue.length <= 1) {
+      handleReviewComplete();
+      return;
+    }
+    // Remove current from queue and move to next
+    const currentId = selectedImport?.id;
+    const remainingIds = reviewQueue.filter((id) => id !== currentId);
+    if (remainingIds.length > 0) {
+      const nextImport = imports.find((i) => i.id === remainingIds[0]);
+      if (nextImport) {
+        setSelectedImport(nextImport);
+        setReviewQueue(remainingIds);
+      } else {
+        handleReviewComplete();
+      }
+    } else {
+      handleReviewComplete();
+    }
   };
 
   const handleLoadMore = () => {
@@ -285,6 +309,9 @@ function EmailImportsContainer({
         onOpenChange={setReviewDialogOpen}
         emailImport={selectedImport}
         onComplete={handleReviewComplete}
+        onNext={reviewQueue.length > 1 ? handleReviewNext : undefined}
+        queuePosition={reviewQueue.length > 1 ? reviewQueue.indexOf(selectedImport?.id || "") + 1 : undefined}
+        queueTotal={reviewQueue.length > 1 ? reviewQueue.length : undefined}
         companies={companies}
         titles={titles}
         locations={locations}

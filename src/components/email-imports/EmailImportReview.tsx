@@ -49,6 +49,9 @@ interface EmailImportReviewProps {
   onOpenChange: (open: boolean) => void;
   emailImport: EmailImportListItem | null;
   onComplete: () => void;
+  onNext?: () => void;
+  queuePosition?: number;
+  queueTotal?: number;
   companies: Company[];
   titles: JobTitle[];
   locations: JobLocation[];
@@ -70,6 +73,9 @@ function EmailImportReview({
   onOpenChange,
   emailImport,
   onComplete,
+  onNext,
+  queuePosition,
+  queueTotal,
   companies,
   titles,
   locations,
@@ -268,7 +274,11 @@ function EmailImportReview({
 
     if (result?.success) {
       toast({ title: "Job created from email import" });
-      onComplete();
+      if (onNext) {
+        onNext();
+      } else {
+        onComplete();
+      }
     } else {
       toast({ title: "Error", description: (result as { message?: string })?.message || "Failed to create job", variant: "destructive" });
     }
@@ -281,7 +291,11 @@ function EmailImportReview({
     const result = await rejectEmailImport(emailImport.id);
     if (result?.success) {
       toast({ title: "Email import rejected" });
-      onComplete();
+      if (onNext) {
+        onNext();
+      } else {
+        onComplete();
+      }
     } else {
       toast({ title: "Error", description: (result as { message?: string })?.message || "Failed to reject", variant: "destructive" });
     }
@@ -294,7 +308,11 @@ function EmailImportReview({
     const result = await skipEmailImport(emailImport.id);
     if (result?.success) {
       toast({ title: "Email import skipped" });
-      onComplete();
+      if (onNext) {
+        onNext();
+      } else {
+        onComplete();
+      }
     } else {
       toast({ title: "Error", description: (result as { message?: string })?.message || "Failed to skip", variant: "destructive" });
     }
@@ -314,6 +332,11 @@ function EmailImportReview({
               <Mail className="h-5 w-5 text-green-600" />
             )}
             Review Email Import
+            {queuePosition && queueTotal && (
+              <Badge variant="outline" className="ml-2">
+                {queuePosition} of {queueTotal}
+              </Badge>
+            )}
           </DialogTitle>
           <DialogDescription>
             Review the extracted information and create a job entry
