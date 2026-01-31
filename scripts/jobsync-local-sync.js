@@ -14,6 +14,7 @@ const { promisify } = require("util");
 const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
+const { CLASSIFICATION_TYPES, classifyByRules } = require("./lib/classification-rules");
 
 const execAsync = promisify(exec);
 
@@ -33,16 +34,7 @@ const LOG_FILE = path.join(JOBSYNC_DIR, "local-sync.log");
 const CORRECTIONS_FILE = path.join(JOBSYNC_DIR, "corrections.json");
 const IS_TTY = process.stdout.isTTY;
 
-// Valid classification types
-const CLASSIFICATION_TYPES = [
-  "job_application",
-  "job_response",
-  "interview",
-  "rejection",
-  "offer",
-  "follow_up",
-  "other"
-];
+// CLASSIFICATION_TYPES and classifyByRules imported from ./lib/classification-rules.js
 
 function log(message) {
   const timestamp = new Date().toISOString();
@@ -338,24 +330,36 @@ async function processOneEmail(filePath, index, total, corrections = []) {
   }
 
   const shortSubject = parsed.subject.substring(0, 40).replace(/\n/g, " ");
-  log(`[${index + 1}/${total}] Classifying: ${shortSubject}...`);
 
-  const classification = await classifyWithOllama(parsed, corrections);
-  if (!classification) {
-    log(`[${index + 1}/${total}]   -> Classification failed, will retry later`);
-    return { status: "classify_failed" };
+  // Try rule-based classification first (fast, no LLM needed)
+  let classification = classifyByRules(parsed);
+  let classificationSource = "rules";
+
+  if (classification) {
+    log(`[${index + 1}/${total}] [RULE:${classification.reason}] ${shortSubject} -> ${classification.type}`);
+  } else {
+    // Fall back to Ollama for complex cases
+    log(`[${index + 1}/${total}] [LLM] Classifying: ${shortSubject}...`);
+    classification = await classifyWithOllama(parsed, corrections);
+    classificationSource = "ollama";
+
+    if (!classification) {
+      log(`[${index + 1}/${total}]   -> Classification failed, will retry later`);
+      return { status: "classify_failed" };
+    }
+
+    log(`[${index + 1}/${total}]   -> ${classification.type} (${(classification.confidence * 100).toFixed(0)}%)`);
   }
-
-  log(`[${index + 1}/${total}]   -> ${classification.type} (${(classification.confidence * 100).toFixed(0)}%)`);
 
   if (!isJobRelated(classification) || classification.confidence < 0.6) {
     await markEmailProcessed(parsed.messageId, classification.type);
-    return { status: "skipped", reason: "not job-related" };
+    return { status: "skipped", reason: "not job-related", source: classificationSource };
   }
 
   await markEmailProcessed(parsed.messageId, classification.type);
   return {
     status: "job_related",
+    source: classificationSource,
     data: {
       messageId: parsed.messageId,
       subject: parsed.subject,
@@ -368,7 +372,7 @@ async function processOneEmail(filePath, index, total, corrections = []) {
       classification: classification.type,
       confidence: classification.confidence,
       isOutbound: parsed.isOutbound,
-      extractedData: classification.extractedData,
+      extractedData: classification.extractedData || {},
     },
   };
 }

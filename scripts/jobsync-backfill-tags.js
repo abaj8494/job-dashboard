@@ -12,18 +12,9 @@
 const { exec } = require("child_process");
 const { promisify } = require("util");
 const { PrismaClient } = require("@prisma/client");
+const { CLASSIFICATION_TYPES } = require("./lib/classification-rules");
 
 const execAsync = promisify(exec);
-
-const CLASSIFICATION_TYPES = [
-  "job_application",
-  "job_response",
-  "interview",
-  "rejection",
-  "offer",
-  "follow_up",
-  "other"
-];
 
 async function main() {
   const prisma = new PrismaClient();

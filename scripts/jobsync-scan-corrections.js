@@ -24,6 +24,7 @@ const { promisify } = require("util");
 const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
+const { CLASSIFICATION_TYPES, isHighVarianceCorrection } = require("./lib/classification-rules");
 
 const execAsync = promisify(exec);
 
@@ -36,15 +37,8 @@ const JOBSYNC_API_URL =
   process.env.JOBSYNC_API_URL || "http://localhost:3000/api/email-sync";
 const JOBSYNC_API_KEY = process.env.JOBSYNC_API_KEY || "";
 
-const CLASSIFICATION_TYPES = [
-  "job_application",
-  "job_response",
-  "interview",
-  "rejection",
-  "offer",
-  "follow_up",
-  "other"
-];
+// High-variance corrections cap (for few-shot learning)
+const MAX_HIGH_VARIANCE_CORRECTIONS = 50;
 
 function log(message) {
   const timestamp = new Date().toISOString();
@@ -138,6 +132,7 @@ async function parseEmailForCorrection(filePath) {
       to: parsed.to?.value?.[0]?.address || "",
       isOutbound,
       bodyPreview: (parsed.text || "").substring(0, 1000),
+      textBody: parsed.text || "", // Full text for rule checking
     };
   } catch (e) {
     log(`Failed to parse email: ${e.message}`);
@@ -309,6 +304,9 @@ async function main() {
     const emailData = await parseEmailForCorrection(filePath);
     if (!emailData) continue;
 
+    // Check if this is a high-variance correction (rules wouldn't catch it)
+    const highVariance = isHighVarianceCorrection(emailData, origType, correctedType);
+
     // Create correction record
     const correction = {
       messageId,
@@ -321,14 +319,21 @@ async function main() {
       isOutbound: emailData.isOutbound,
       bodyPreview: emailData.bodyPreview,
       correctedAt: new Date().toISOString(),
+      highVariance, // Track if this is useful for few-shot learning
     };
 
-    existingData.corrections.push(correction);
+    // Always add to server sync list (update database)
     newCorrectionsList.push(correction);
     processedIds.add(messageId);
     newCorrections++;
 
-    log(`Recorded correction: "${emailData.subject.substring(0, 40)}..." ${origType} -> ${correctedType}`);
+    // Only add high-variance corrections to the few-shot learning list
+    if (highVariance) {
+      existingData.corrections.push(correction);
+      log(`Recorded HIGH-VARIANCE correction: "${emailData.subject.substring(0, 40)}..." ${origType} -> ${correctedType}`);
+    } else {
+      log(`Recorded rule-catchable correction: "${emailData.subject.substring(0, 40)}..." ${origType} -> ${correctedType} (not added to few-shot)`);
+    }
 
     // Clean up the was tag (keep only the corrected tag)
     try {
@@ -338,16 +343,17 @@ async function main() {
     }
   }
 
-  // Keep only the most recent 50 corrections (for prompt size management)
-  if (existingData.corrections.length > 50) {
-    existingData.corrections = existingData.corrections.slice(-50);
+  // Keep only the most recent high-variance corrections (for prompt size management)
+  if (existingData.corrections.length > MAX_HIGH_VARIANCE_CORRECTIONS) {
+    existingData.corrections = existingData.corrections.slice(-MAX_HIGH_VARIANCE_CORRECTIONS);
   }
 
   existingData.lastScan = new Date().toISOString();
   saveCorrections(existingData);
   saveProcessedCorrections(processedIds);
 
-  log(`Scan complete. Added ${newCorrections} new corrections. Total: ${existingData.corrections.length}`);
+  const highVarianceCount = existingData.corrections.length;
+  log(`Scan complete. Processed ${newCorrections} corrections. High-variance for few-shot: ${highVarianceCount}`);
 
   // Send new corrections to server to update database
   if (newCorrectionsList.length > 0) {

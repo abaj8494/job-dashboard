@@ -14,6 +14,7 @@ const { promisify } = require("util");
 const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
+const { CLASSIFICATION_TYPES, classifyByRules } = require("./lib/classification-rules");
 
 const execAsync = promisify(exec);
 
@@ -30,16 +31,6 @@ const CONCURRENCY = parseInt(process.env.JOBSYNC_CONCURRENCY || "4", 10);
 
 const JOBSYNC_DIR = path.join(process.env.HOME || "~", ".jobsync");
 const CORRECTIONS_FILE = path.join(JOBSYNC_DIR, "corrections.json");
-
-const CLASSIFICATION_TYPES = [
-  "job_application",
-  "job_response",
-  "interview",
-  "rejection",
-  "offer",
-  "follow_up",
-  "other"
-];
 
 function log(message) {
   const timestamp = new Date().toISOString();
@@ -310,14 +301,21 @@ async function main() {
       }
 
       const shortSubject = parsed.subject.substring(0, 40).replace(/\n/g, " ");
-      log(`[${index + 1}/${total}] Classifying: ${shortSubject}...`);
 
-      const classification = await classifyWithOllama(parsed, corrections);
-      if (!classification) {
-        return { status: "classify_failed" };
+      // Try rule-based classification first (fast)
+      let classification = classifyByRules(parsed);
+
+      if (classification) {
+        log(`[${index + 1}/${total}] [RULE:${classification.reason}] ${shortSubject} -> ${classification.type}`);
+      } else {
+        // Fall back to Ollama
+        log(`[${index + 1}/${total}] [LLM] Classifying: ${shortSubject}...`);
+        classification = await classifyWithOllama(parsed, corrections);
+        if (!classification) {
+          return { status: "classify_failed" };
+        }
+        log(`[${index + 1}/${total}]   -> ${classification.type} (${(classification.confidence * 100).toFixed(0)}%)`);
       }
-
-      log(`[${index + 1}/${total}]   -> ${classification.type} (${(classification.confidence * 100).toFixed(0)}%)`);
 
       // Add the classification tag
       await addClassificationTag(messageId, classification.type);
