@@ -28,6 +28,7 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
+  RotateCcw,
 } from "lucide-react";
 import { format } from "date-fns";
 import {
@@ -41,6 +42,7 @@ import {
   deleteEmailImport,
   bulkRejectEmailImports,
   bulkSkipEmailImports,
+  restoreToPending,
 } from "@/actions/email-import.actions";
 import { toast } from "../ui/use-toast";
 
@@ -153,6 +155,18 @@ function EmailImportsTable({ imports, onReview, onRefresh, sortBy, sortOrder, on
     const result = await deleteEmailImport(id);
     if (result?.success) {
       toast({ title: "Email import deleted" });
+      onRefresh();
+    } else {
+      toast({ title: "Error", description: (result as { message?: string })?.message || "Failed", variant: "destructive" });
+    }
+    setLoading(false);
+  };
+
+  const handleRestore = async (id: string) => {
+    setLoading(true);
+    const result = await restoreToPending(id);
+    if (result?.success) {
+      toast({ title: "Email import restored to pending" });
       onRefresh();
     } else {
       toast({ title: "Error", description: (result as { message?: string })?.message || "Failed", variant: "destructive" });
@@ -328,6 +342,12 @@ function EmailImportsTable({ imports, onReview, onRefresh, sortBy, sortOrder, on
                             Reject
                           </DropdownMenuItem>
                         </>
+                      )}
+                      {(emailImport.status === "rejected" || emailImport.status === "skipped") && (
+                        <DropdownMenuItem onClick={() => handleRestore(emailImport.id)}>
+                          <RotateCcw className="h-4 w-4 mr-2" />
+                          Restore to Pending
+                        </DropdownMenuItem>
                       )}
                       <DropdownMenuItem
                         onClick={() => handleDelete(emailImport.id)}

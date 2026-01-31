@@ -348,3 +348,29 @@ export const deleteEmailImport = async (importId: string) => {
     return handleError(error, "Failed to delete email import");
   }
 };
+
+/**
+ * Restore email import to pending status
+ */
+export const restoreToPending = async (importId: string) => {
+  try {
+    const user = await getCurrentUser();
+    if (!user) {
+      throw new Error("Not authenticated");
+    }
+
+    await prisma.emailImport.update({
+      where: { id: importId, userId: user.id },
+      data: {
+        status: "pending",
+        reviewedAt: null,
+      },
+    });
+
+    revalidatePath("/dashboard/email-imports");
+
+    return { success: true };
+  } catch (error) {
+    return handleError(error, "Failed to restore email import");
+  }
+};

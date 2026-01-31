@@ -305,7 +305,7 @@ function EmailImportReview({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[90vh]">
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {emailImport.isOutbound ? (
@@ -546,7 +546,7 @@ function EmailImportReview({
 
           <TabsContent value="email" className="mt-4">
             <ScrollArea className="h-[400px]">
-              <div className="space-y-4 pr-4">
+              <div className="space-y-4 pr-4 max-w-full overflow-hidden">
                 <div className="bg-muted p-4 rounded-lg">
                   <p className="font-medium mb-2 break-words">{emailImport.subject}</p>
                   <div className="text-sm text-muted-foreground space-y-1">
@@ -556,7 +556,7 @@ function EmailImportReview({
                   </div>
                 </div>
                 <Separator />
-                <div className="whitespace-pre-wrap text-sm break-words overflow-hidden">
+                <div className="whitespace-pre-wrap text-sm break-all overflow-hidden" style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
                   {emailImport.bodyText || "(No text content)"}
                 </div>
               </div>
