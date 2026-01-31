@@ -243,6 +243,57 @@ async function sendCorrectionsToServer(corrections) {
 }
 
 /**
+ * Delete emails from the server
+ * Used when correcting job-related -> "other" (no longer job-related)
+ */
+async function deleteFromServer(items) {
+  if (!JOBSYNC_API_KEY) {
+    log("JOBSYNC_API_KEY not set, skipping deletions");
+    return;
+  }
+
+  if (items.length === 0) {
+    return;
+  }
+
+  let deleted = 0;
+  let notFound = 0;
+
+  for (const { messageId, subject } of items) {
+    try {
+      const cleanId = messageId.replace(/^<|>$/g, "");
+      const url = `${JOBSYNC_API_URL}?messageId=${encodeURIComponent(cleanId)}`;
+
+      const response = await fetch(url, {
+        method: "DELETE",
+        headers: {
+          "x-api-key": JOBSYNC_API_KEY,
+        },
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        log(`Failed to delete "${subject.substring(0, 30)}...": ${text}`);
+        notFound++;
+        continue;
+      }
+
+      const result = await response.json();
+      if (result.deleted > 0) {
+        deleted++;
+      } else {
+        notFound++;
+      }
+    } catch (error) {
+      log(`Failed to delete ${messageId}: ${error.message}`);
+      notFound++;
+    }
+  }
+
+  log(`Demotions: ${deleted} deleted from server, ${notFound} not found`);
+}
+
+/**
  * Send new imports to the server
  * Used when correcting "other" -> job-related (email wasn't on server before)
  */
@@ -296,6 +347,7 @@ async function main() {
   let newCorrections = 0;
   const correctionsList = [];  // For job-related -> job-related (PATCH)
   const newImportsList = [];   // For "other" -> job-related (POST)
+  const deleteList = [];       // For job-related -> "other" (DELETE from server)
 
   for (const { messageId, originalType, source } of correctedEmails) {
     // Skip if already processed
@@ -372,8 +424,8 @@ async function main() {
     processedIds.add(messageId);
     newCorrections++;
 
-    // Handle differently based on original type
-    if (origType === "other") {
+    // Handle differently based on original and corrected types
+    if (origType === "other" && correctedType !== "other") {
       // "other" -> job-related: email wasn't on server, need to send as new import
       const importData = {
         messageId: emailData.messageId,
@@ -391,7 +443,15 @@ async function main() {
       };
       newImportsList.push(importData);
       log(`Promoting from "other": "${emailData.subject.substring(0, 40)}..." -> ${correctedType}`);
-    } else {
+    } else if (correctedType === "other" && origType !== "other") {
+      // job-related -> "other": delete from server (no longer job-related)
+      deleteList.push({ messageId, subject: emailData.subject });
+      if (highVariance) {
+        log(`Demoting to "other" (will delete): "${emailData.subject.substring(0, 40)}..." ${origType} -> other`);
+      } else {
+        log(`Demoting to "other" (rule-catchable): "${emailData.subject.substring(0, 40)}..." ${origType} -> other`);
+      }
+    } else if (origType !== "other" && correctedType !== "other") {
       // job-related -> job-related: update existing record on server
       correctionsList.push(correction);
       if (highVariance) {
@@ -436,6 +496,12 @@ async function main() {
   if (correctionsList.length > 0) {
     log(`Syncing ${correctionsList.length} corrections to server...`);
     await sendCorrectionsToServer(correctionsList);
+  }
+
+  // Delete from server (for job-related -> "other" demotions)
+  if (deleteList.length > 0) {
+    log(`Removing ${deleteList.length} demoted emails from server...`);
+    await deleteFromServer(deleteList);
   }
 
   // Print usage instructions if no corrections found

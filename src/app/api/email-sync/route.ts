@@ -483,12 +483,12 @@ export const GET = async (req: NextRequest) => {
 /**
  * DELETE /api/email-sync
  *
- * Delete email imports by classification.
- * Used to clean up non-job-related emails (e.g., "other" category).
+ * Delete email imports by classification OR by messageId.
  *
  * Query params:
- *   - classification: The classification type to delete (required)
- *   - confirm: Must be "true" to actually delete (safety check)
+ *   - classification: Delete all with this classification type
+ *   - messageId: Delete specific email by messageId
+ *   - confirm: Must be "true" to actually delete (safety check, only for classification)
  */
 export const DELETE = async (req: NextRequest) => {
   // Verify API key
@@ -506,11 +506,45 @@ export const DELETE = async (req: NextRequest) => {
   try {
     const { searchParams } = new URL(req.url);
     const classification = searchParams.get("classification");
+    const messageId = searchParams.get("messageId");
     const confirm = searchParams.get("confirm");
 
+    // Delete by messageId (single email)
+    if (messageId) {
+      const cleanMessageId = messageId.replace(/^<|>$/g, "");
+
+      // Try to find and delete
+      const emailImport = await prisma.emailImport.findFirst({
+        where: {
+          OR: [
+            { messageId: cleanMessageId },
+            { messageId: `<${cleanMessageId}>` },
+            { messageId: messageId },
+          ],
+        },
+      });
+
+      if (!emailImport) {
+        return NextResponse.json({
+          message: "Email import not found",
+          deleted: 0,
+        });
+      }
+
+      await prisma.emailImport.delete({
+        where: { id: emailImport.id },
+      });
+
+      return NextResponse.json({
+        message: "Email import deleted",
+        deleted: 1,
+      });
+    }
+
+    // Delete by classification (bulk)
     if (!classification) {
       return NextResponse.json(
-        { error: "Missing required parameter: classification" },
+        { error: "Missing required parameter: classification or messageId" },
         { status: 400 }
       );
     }
