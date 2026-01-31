@@ -434,11 +434,20 @@ export const PATCH = async (req: NextRequest) => {
 /**
  * GET /api/email-sync
  *
- * Get pending email import count (for dashboard indicator)
+ * Get email import stats including classification breakdown
  */
 export const GET = async (req: NextRequest) => {
-  // This endpoint can be called from the UI, so use session auth
-  // For simplicity, we'll make it public for now (just returns counts)
+  // Verify API key
+  const authHeader = req.headers.get("x-api-key");
+  if (!API_KEY) {
+    return NextResponse.json(
+      { error: "EMAIL_SYNC_API_KEY not configured" },
+      { status: 500 }
+    );
+  }
+  if (authHeader !== API_KEY) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
   try {
     const pendingCount = await prisma.emailImport.count({
@@ -447,13 +456,99 @@ export const GET = async (req: NextRequest) => {
 
     const totalCount = await prisma.emailImport.count();
 
+    // Get classification breakdown
+    const classificationCounts = await prisma.emailImport.groupBy({
+      by: ["classification"],
+      _count: { classification: true },
+    });
+
+    const byClassification: Record<string, number> = {};
+    for (const item of classificationCounts) {
+      byClassification[item.classification] = item._count.classification;
+    }
+
     return NextResponse.json({
       pending: pendingCount,
       total: totalCount,
+      byClassification,
     });
   } catch (error) {
     return NextResponse.json(
       { error: "Failed to get email import stats" },
+      { status: 500 }
+    );
+  }
+};
+
+/**
+ * DELETE /api/email-sync
+ *
+ * Delete email imports by classification.
+ * Used to clean up non-job-related emails (e.g., "other" category).
+ *
+ * Query params:
+ *   - classification: The classification type to delete (required)
+ *   - confirm: Must be "true" to actually delete (safety check)
+ */
+export const DELETE = async (req: NextRequest) => {
+  // Verify API key
+  const authHeader = req.headers.get("x-api-key");
+  if (!API_KEY) {
+    return NextResponse.json(
+      { error: "EMAIL_SYNC_API_KEY not configured" },
+      { status: 500 }
+    );
+  }
+  if (authHeader !== API_KEY) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  try {
+    const { searchParams } = new URL(req.url);
+    const classification = searchParams.get("classification");
+    const confirm = searchParams.get("confirm");
+
+    if (!classification) {
+      return NextResponse.json(
+        { error: "Missing required parameter: classification" },
+        { status: 400 }
+      );
+    }
+
+    // Count how many would be deleted
+    const count = await prisma.emailImport.count({
+      where: { classification },
+    });
+
+    if (count === 0) {
+      return NextResponse.json({
+        message: `No emails found with classification "${classification}"`,
+        deleted: 0,
+      });
+    }
+
+    // If confirm is not "true", just return the count (dry run)
+    if (confirm !== "true") {
+      return NextResponse.json({
+        message: `Would delete ${count} emails with classification "${classification}". Add ?confirm=true to actually delete.`,
+        wouldDelete: count,
+        dryRun: true,
+      });
+    }
+
+    // Actually delete
+    const result = await prisma.emailImport.deleteMany({
+      where: { classification },
+    });
+
+    return NextResponse.json({
+      message: `Deleted ${result.count} emails with classification "${classification}"`,
+      deleted: result.count,
+    });
+  } catch (error) {
+    console.error("Delete error:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Delete failed" },
       { status: 500 }
     );
   }
