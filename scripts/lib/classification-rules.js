@@ -99,8 +99,8 @@ const CLASSIFICATION_RULES = {
   // JOB_RESPONSE (application confirmations)
   // -------------------------------------------------------------------------
   job_response: [
-    // Thank you for applying patterns
-    { field: "subject", pattern: /thank(s| you) for (your )?(apply|application|interest)/i, reason: "thank-you-applying" },
+    // Thank you for applying patterns (note: "thankyou" can be one word)
+    { field: "subject", pattern: /thank(s| ?you|you) for (your )?(apply|application|interest)/i, reason: "thank-you-applying" },
     { field: "subject", pattern: /we('ve| have) received your application/i, reason: "received-application" },
     { field: "subject", pattern: /application (received|submitted|complete|acknowledged)/i, reason: "application-received" },
     { field: "subject", pattern: /your application (for|to|at|with)/i, reason: "your-application" },
@@ -157,13 +157,13 @@ const CLASSIFICATION_RULES = {
     { field: "subject", pattern: /application outcome/i, condition: (e) => !/thank|received/i.test(e.subject), reason: "outcome-likely-rejection" },
     { field: "subject", pattern: /outcome of your application/i, reason: "outcome" },
     { field: "subject", pattern: /unsuccessful.*application/i, reason: "unsuccessful" },
-    { field: "subject", pattern: /update.*application/i, condition: (e) => /regret|unfortunately|not.*proceed|not.*successful/i.test(e.textBody?.substring(0, 500) || ""), reason: "rejection-update" },
+    { field: "subject", pattern: /update.*application/i, condition: (e) => /regret|unfortunately|unable|ineligible|not.*proceed|not.*successful/i.test(e.textBody?.substring(0, 500) || ""), reason: "rejection-update" },
     { field: "subject", pattern: /we('ve| have) reviewed your application/i, reason: "reviewed-likely-rejection" },
     { field: "subject", pattern: /not (be )?(moving|proceed|progress)ing forward/i, reason: "not-proceeding" },
     { field: "subject", pattern: /regret to inform/i, reason: "regret" },
     { field: "subject", pattern: /role update|position.*update/i, condition: (e) => !/interview|schedule/i.test(e.subject), reason: "role-update-rejection" },
     { field: "subject", pattern: /application.*status|status.*application/i, condition: (e) => /close|filled|not.*selected/i.test(e.textBody?.substring(0, 500) || ""), reason: "status-rejection" },
-    { field: "subject", pattern: /thank you for.*interest/i, condition: (e) => /unfortunately|regret|not.*time|other candidates/i.test(e.textBody?.substring(0, 500) || ""), reason: "polite-rejection" },
+    { field: "subject", pattern: /thank you for.*interest/i, condition: (e) => /unfortunately|regret|unable|ineligible|not.*time|other candidates/i.test(e.textBody?.substring(0, 500) || ""), reason: "polite-rejection" },
   ],
 
   // -------------------------------------------------------------------------
