@@ -112,7 +112,7 @@ async function getJobsyncTags(messageId) {
 }
 
 /**
- * Parse email file to get context for few-shot learning
+ * Parse email file to get context for few-shot learning and server import
  */
 async function parseEmailForCorrection(filePath) {
   try {
@@ -120,19 +120,27 @@ async function parseEmailForCorrection(filePath) {
     const parsed = await simpleParser(content);
 
     const fromAddress = parsed.from?.value?.[0]?.address || parsed.from?.text || "";
+    const toAddress = parsed.to
+      ? Array.isArray(parsed.to)
+        ? parsed.to[0]?.value?.[0]?.address || ""
+        : parsed.to.value?.[0]?.address || parsed.to.text || ""
+      : "";
     const monitoredEmails = (process.env.MONITORED_EMAILS || "j@abaj.ai,aayushbajaj7@gmail.com").split(",");
     const isOutbound = monitoredEmails.some(
       (email) => fromAddress.toLowerCase() === email.toLowerCase()
     );
 
     return {
+      messageId: parsed.messageId || `generated-${Date.now()}-${Math.random()}`,
       subject: parsed.subject || "(No subject)",
       from: fromAddress,
       fromName: parsed.from?.value?.[0]?.name,
-      to: parsed.to?.value?.[0]?.address || "",
+      to: toAddress,
+      date: parsed.date || new Date(),
       isOutbound,
       bodyPreview: (parsed.text || "").substring(0, 1000),
       textBody: parsed.text || "", // Full text for rule checking
+      htmlBody: parsed.html || undefined,
     };
   } catch (e) {
     log(`Failed to parse email: ${e.message}`);
@@ -193,6 +201,7 @@ async function findCorrectedEmails() {
 
 /**
  * Send corrections to the server to update database classifications
+ * Only for corrections between job-related types (not from "other")
  */
 async function sendCorrectionsToServer(corrections) {
   if (!JOBSYNC_API_KEY) {
@@ -233,6 +242,43 @@ async function sendCorrectionsToServer(corrections) {
   }
 }
 
+/**
+ * Send new imports to the server
+ * Used when correcting "other" -> job-related (email wasn't on server before)
+ */
+async function sendNewImportsToServer(imports) {
+  if (!JOBSYNC_API_KEY) {
+    log("JOBSYNC_API_KEY not set, skipping new imports");
+    return;
+  }
+
+  if (imports.length === 0) {
+    return;
+  }
+
+  try {
+    const response = await fetch(JOBSYNC_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": JOBSYNC_API_KEY,
+      },
+      body: JSON.stringify({ imports }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      log(`Server returned ${response.status}: ${text}`);
+      return;
+    }
+
+    const result = await response.json();
+    log(`New imports: ${result.processed} added, ${result.skipped} skipped`);
+  } catch (error) {
+    log(`Failed to send new imports to server: ${error.message}`);
+  }
+}
+
 async function main() {
   log("Scanning for user corrections...");
 
@@ -248,7 +294,8 @@ async function main() {
   log(`Found ${correctedEmails.length} potentially corrected emails`);
 
   let newCorrections = 0;
-  const newCorrectionsList = [];
+  const correctionsList = [];  // For job-related -> job-related (PATCH)
+  const newImportsList = [];   // For "other" -> job-related (POST)
 
   for (const { messageId, originalType, source } of correctedEmails) {
     // Skip if already processed
@@ -307,7 +354,7 @@ async function main() {
     // Check if this is a high-variance correction (rules wouldn't catch it)
     const highVariance = isHighVarianceCorrection(emailData, origType, correctedType);
 
-    // Create correction record
+    // Create correction record for few-shot learning
     const correction = {
       messageId,
       originalType: origType,
@@ -322,17 +369,41 @@ async function main() {
       highVariance, // Track if this is useful for few-shot learning
     };
 
-    // Always add to server sync list (update database)
-    newCorrectionsList.push(correction);
     processedIds.add(messageId);
     newCorrections++;
+
+    // Handle differently based on original type
+    if (origType === "other") {
+      // "other" -> job-related: email wasn't on server, need to send as new import
+      const importData = {
+        messageId: emailData.messageId,
+        subject: emailData.subject,
+        fromEmail: emailData.from,
+        fromName: emailData.fromName,
+        toEmail: emailData.to,
+        emailDate: emailData.date.toISOString(),
+        bodyText: (emailData.textBody || "").substring(0, 10000),
+        bodyHtml: (emailData.htmlBody || "").substring(0, 50000),
+        classification: correctedType,
+        confidence: 1.0, // User-corrected = 100% confidence
+        isOutbound: emailData.isOutbound,
+        extractedData: {}, // User can edit on server if needed
+      };
+      newImportsList.push(importData);
+      log(`Promoting from "other": "${emailData.subject.substring(0, 40)}..." -> ${correctedType}`);
+    } else {
+      // job-related -> job-related: update existing record on server
+      correctionsList.push(correction);
+      if (highVariance) {
+        log(`Recorded HIGH-VARIANCE correction: "${emailData.subject.substring(0, 40)}..." ${origType} -> ${correctedType}`);
+      } else {
+        log(`Recorded rule-catchable correction: "${emailData.subject.substring(0, 40)}..." ${origType} -> ${correctedType}`);
+      }
+    }
 
     // Only add high-variance corrections to the few-shot learning list
     if (highVariance) {
       existingData.corrections.push(correction);
-      log(`Recorded HIGH-VARIANCE correction: "${emailData.subject.substring(0, 40)}..." ${origType} -> ${correctedType}`);
-    } else {
-      log(`Recorded rule-catchable correction: "${emailData.subject.substring(0, 40)}..." ${origType} -> ${correctedType} (not added to few-shot)`);
     }
 
     // Clean up the was tag (keep only the corrected tag)
@@ -355,11 +426,16 @@ async function main() {
   const highVarianceCount = existingData.corrections.length;
   log(`Scan complete. Processed ${newCorrections} corrections. High-variance for few-shot: ${highVarianceCount}`);
 
-  // Send new corrections to server to update database
-  if (newCorrectionsList.length > 0) {
-    log("Syncing corrections to server...");
-    await sendCorrectionsToServer(newCorrectionsList);
-    log("These corrections will be used as few-shot examples in future classifications.");
+  // Send new imports to server (for "other" -> job-related promotions)
+  if (newImportsList.length > 0) {
+    log(`Sending ${newImportsList.length} promoted emails to server...`);
+    await sendNewImportsToServer(newImportsList);
+  }
+
+  // Send corrections to server to update existing records
+  if (correctionsList.length > 0) {
+    log(`Syncing ${correctionsList.length} corrections to server...`);
+    await sendCorrectionsToServer(correctionsList);
   }
 
   // Print usage instructions if no corrections found
