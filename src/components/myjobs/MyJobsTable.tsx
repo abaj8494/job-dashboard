@@ -176,7 +176,7 @@ function MyJobsTable({
                                   onSelect={(_) => {
                                     onChangeJobStatus(job.id, status);
                                   }}
-                                  disabled={status.id === job.Status.id}
+                                  disabled={status.id === job.Status?.id}
                                 >
                                   <span>{status.label}</span>
                                 </DropdownMenuItem>
