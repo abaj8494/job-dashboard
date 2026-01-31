@@ -30,7 +30,6 @@ const execAsync = promisify(exec);
 
 const JOBSYNC_DIR = path.join(process.env.HOME || "~", ".jobsync");
 const CORRECTIONS_FILE = path.join(JOBSYNC_DIR, "corrections.json");
-const PROCESSED_CORRECTIONS_FILE = path.join(JOBSYNC_DIR, "processed-corrections.json");
 
 // Load config for API settings
 const JOBSYNC_API_URL =
@@ -71,31 +70,6 @@ function saveCorrections(data) {
   }
 }
 
-/**
- * Load set of already-processed correction message IDs (to avoid duplicates)
- */
-function loadProcessedCorrections() {
-  try {
-    if (fs.existsSync(PROCESSED_CORRECTIONS_FILE)) {
-      const data = fs.readFileSync(PROCESSED_CORRECTIONS_FILE, "utf-8");
-      return new Set(JSON.parse(data));
-    }
-  } catch (e) {
-    log(`Failed to load processed corrections: ${e.message}`);
-  }
-  return new Set();
-}
-
-/**
- * Save processed corrections set
- */
-function saveProcessedCorrections(processedSet) {
-  try {
-    fs.writeFileSync(PROCESSED_CORRECTIONS_FILE, JSON.stringify([...processedSet], null, 2));
-  } catch (e) {
-    log(`Failed to save processed corrections: ${e.message}`);
-  }
-}
 
 /**
  * Get the jobsync/* tags for a message
@@ -339,10 +313,9 @@ async function main() {
   }
 
   const existingData = loadCorrections();
-  const processedIds = loadProcessedCorrections();
   const correctedEmails = await findCorrectedEmails();
 
-  log(`Found ${correctedEmails.length} potentially corrected emails`);
+  log(`Found ${correctedEmails.length} emails with correction tags`);
 
   let newCorrections = 0;
   const correctionsList = [];  // For job-related -> job-related (PATCH)
@@ -350,11 +323,6 @@ async function main() {
   const deleteList = [];       // For job-related -> "other" (DELETE from server)
 
   for (const { messageId, originalType, source } of correctedEmails) {
-    // Skip if already processed
-    if (processedIds.has(messageId)) {
-      continue;
-    }
-
     // Get current tags
     const currentTags = await getJobsyncTags(messageId);
     if (currentTags.length === 0) {
@@ -421,7 +389,6 @@ async function main() {
       highVariance, // Track if this is useful for few-shot learning
     };
 
-    processedIds.add(messageId);
     newCorrections++;
 
     // Handle differently based on original and corrected types
@@ -481,7 +448,6 @@ async function main() {
 
   existingData.lastScan = new Date().toISOString();
   saveCorrections(existingData);
-  saveProcessedCorrections(processedIds);
 
   const highVarianceCount = existingData.corrections.length;
   log(`Scan complete. Processed ${newCorrections} corrections. High-variance for few-shot: ${highVarianceCount}`);
