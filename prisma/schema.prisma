@@ -224,14 +224,14 @@ model Job {
   userId      String
   User        User         @relation(fields: [userId], references: [id])
   jobUrl      String?
-  description String
-  jobType     String
+  description String?
+  jobType     String?
   createdAt   DateTime
   applied     Boolean      @default(false)
   appliedDate DateTime?
   dueDate     DateTime?
-  statusId    String
-  Status      JobStatus    @relation(fields: [statusId], references: [id])
+  statusId    String?
+  Status      JobStatus?   @relation(fields: [statusId], references: [id])
   JobTitle    JobTitle     @relation(fields: [jobTitleId], references: [id])
   jobTitleId  String
   Company     Company      @relation(fields: [companyId], references: [id])
