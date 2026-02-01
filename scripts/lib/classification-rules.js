@@ -127,6 +127,10 @@ const CLASSIFICATION_RULES = {
 
     // NinjaTech, Neara, etc.
     { field: "subject", pattern: /received your job application/i, reason: "received-job-app" },
+
+    // SEEK application confirmations
+    { field: "from", pattern: /seek/i, condition: (e) => /application.*(successfully )?(submitted|sent|received)/i.test(e.subject), reason: "seek-confirmation" },
+    { field: "subject", pattern: /your application was successfully submitted/i, reason: "application-submitted" },
   ],
 
   // -------------------------------------------------------------------------
