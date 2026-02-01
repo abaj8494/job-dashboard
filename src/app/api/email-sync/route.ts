@@ -338,10 +338,9 @@ async function handleLocalMode(userId: string): Promise<NextResponse> {
 /**
  * PATCH /api/email-sync
  *
- * Update classifications from user corrections.
- * Called by the corrections scanner when user changes tags in notmuch.
- *
- * Body: { corrections: [{ messageId, originalType, correctedType }] }
+ * Update email imports. Supports two modes:
+ * 1. corrections: [{ messageId, originalType, correctedType }] - Update classification
+ * 2. updates: [{ messageId, extractedData }] - Update extracted data (company, jobTitle, etc.)
  */
 export const PATCH = async (req: NextRequest) => {
   // Verify API key
@@ -362,11 +361,16 @@ export const PATCH = async (req: NextRequest) => {
       messageId: string;
       originalType: string;
       correctedType: string;
-    }>;
+    }> | undefined;
 
-    if (!corrections || !Array.isArray(corrections)) {
+    const updates = body.updates as Array<{
+      messageId: string;
+      extractedData: Record<string, string>;
+    }> | undefined;
+
+    if (!corrections && !updates) {
       return NextResponse.json(
-        { error: "Invalid request body - expected { corrections: [...] }" },
+        { error: "Invalid request body - expected { corrections: [...] } or { updates: [...] }" },
         { status: 400 }
       );
     }
@@ -375,57 +379,106 @@ export const PATCH = async (req: NextRequest) => {
     let notFound = 0;
     const errors: string[] = [];
 
-    for (const correction of corrections) {
-      try {
-        // Clean message ID (remove angle brackets if present)
-        const cleanMessageId = correction.messageId.replace(/^<|>$/g, "");
+    // Handle corrections (classification changes)
+    if (corrections && Array.isArray(corrections)) {
+      for (const correction of corrections) {
+        try {
+          const cleanMessageId = correction.messageId.replace(/^<|>$/g, "");
+          const emailImport = await prisma.emailImport.findFirst({
+            where: {
+              OR: [
+                { messageId: cleanMessageId },
+                { messageId: `<${cleanMessageId}>` },
+                { messageId: correction.messageId },
+              ],
+            },
+          });
 
-        // Try to find the email import by messageId
-        const emailImport = await prisma.emailImport.findFirst({
-          where: {
-            OR: [
-              { messageId: cleanMessageId },
-              { messageId: `<${cleanMessageId}>` },
-              { messageId: correction.messageId },
-            ],
-          },
-        });
+          if (!emailImport) {
+            notFound++;
+            continue;
+          }
 
-        if (!emailImport) {
-          notFound++;
-          continue;
+          await prisma.emailImport.update({
+            where: { id: emailImport.id },
+            data: {
+              classification: correction.correctedType,
+              updatedAt: new Date(),
+            },
+          });
+
+          updated++;
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : "Unknown error";
+          errors.push(
+            `Error updating ${correction.messageId}: ${errorMessage}`
+          );
         }
+      }
+    }
 
-        // Update the classification
-        await prisma.emailImport.update({
-          where: { id: emailImport.id },
-          data: {
-            classification: correction.correctedType,
-            // Optionally track that this was user-corrected
-            updatedAt: new Date(),
-          },
-        });
+    // Handle updates (extractedData changes)
+    if (updates && Array.isArray(updates)) {
+      for (const update of updates) {
+        try {
+          const cleanMessageId = update.messageId.replace(/^<|>$/g, "");
+          const emailImport = await prisma.emailImport.findFirst({
+            where: {
+              OR: [
+                { messageId: cleanMessageId },
+                { messageId: `<${cleanMessageId}>` },
+                { messageId: update.messageId },
+              ],
+            },
+          });
 
-        updated++;
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : "Unknown error";
-        errors.push(
-          `Error updating ${correction.messageId}: ${errorMessage}`
-        );
+          if (!emailImport) {
+            notFound++;
+            continue;
+          }
+
+          // Merge with existing extractedData
+          let existingData: Record<string, string> = {};
+          try {
+            if (emailImport.extractedData) {
+              existingData = JSON.parse(emailImport.extractedData);
+            }
+          } catch {
+            // Ignore parse errors
+          }
+
+          const mergedData = { ...existingData, ...update.extractedData };
+
+          await prisma.emailImport.update({
+            where: { id: emailImport.id },
+            data: {
+              extractedData: JSON.stringify(mergedData),
+              updatedAt: new Date(),
+            },
+          });
+
+          updated++;
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : "Unknown error";
+          errors.push(
+            `Error updating ${update.messageId}: ${errorMessage}`
+          );
+        }
       }
     }
 
     return NextResponse.json({
-      message: "Corrections applied",
+      message: "Updates applied",
       updated,
       notFound,
       errors: errors.length > 0 ? errors : undefined,
     });
   } catch (error) {
-    console.error("Correction sync error:", error);
+    console.error("Patch sync error:", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Correction sync failed" },
+      { error: error instanceof Error ? error.message : "Patch sync failed" },
       { status: 500 }
     );
   }
