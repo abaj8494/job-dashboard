@@ -6,7 +6,13 @@
  * company/job title to update existing EmailImport records.
  *
  * Usage:
- *   node scripts/jobsync-backfill-seek.js [--dry-run]
+ *   node scripts/jobsync-backfill-seek.js [--dry-run] [--all]
+ *   node scripts/jobsync-backfill-seek.js [--dry-run] [--since=7d]
+ *
+ * Options:
+ *   --dry-run   Preview without updating
+ *   --all       Process all SEEK emails (not just today)
+ *   --since=Nd  Process emails from last N days (e.g., --since=7d)
  */
 
 const { exec } = require("child_process");
@@ -19,6 +25,11 @@ const execAsync = promisify(exec);
 const JOBSYNC_API_URL = process.env.JOBSYNC_API_URL || "http://localhost:3000/api/email-sync";
 const JOBSYNC_API_KEY = process.env.JOBSYNC_API_KEY || "";
 const DRY_RUN = process.argv.includes("--dry-run");
+const ALL = process.argv.includes("--all");
+
+// Parse --since=Nd argument
+const sinceArg = process.argv.find(arg => arg.startsWith("--since="));
+const SINCE = sinceArg ? sinceArg.replace("--since=", "") : null;
 
 function log(message) {
   const timestamp = new Date().toISOString();
@@ -99,15 +110,25 @@ async function updateExtractedData(messageId, extractedData) {
 }
 
 async function main() {
-  log(DRY_RUN ? "Starting SEEK backfill (DRY RUN)..." : "Starting SEEK backfill...");
+  const mode = DRY_RUN ? " (DRY RUN)" : "";
+  const range = ALL ? " (all time)" : SINCE ? ` (since ${SINCE})` : " (today)";
+  log(`Starting SEEK backfill${mode}${range}...`);
 
   if (!JOBSYNC_API_KEY && !DRY_RUN) {
     log("ERROR: JOBSYNC_API_KEY not set");
     process.exit(1);
   }
 
-  // Find today's SEEK emails
-  const query = 'date:today from:seek tag:jobsync/job_response';
+  // Build query based on options
+  let dateFilter = "date:today";
+  if (ALL) {
+    dateFilter = "";
+  } else if (SINCE) {
+    dateFilter = `date:${SINCE}..`;
+  }
+
+  // Find SEEK emails with any jobsync classification (they might be tagged as job_application or job_response)
+  const query = `${dateFilter} from:seek (tag:jobsync/job_application OR tag:jobsync/job_response)`.trim();
 
   try {
     const { stdout } = await execAsync(
