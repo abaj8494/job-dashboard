@@ -128,8 +128,21 @@ const CLASSIFICATION_RULES = {
     // NinjaTech, Neara, etc.
     { field: "subject", pattern: /received your job application/i, reason: "received-job-app" },
 
-    // SEEK application confirmations
-    { field: "from", pattern: /seek/i, condition: (e) => /application.*(successfully )?(submitted|sent|received)/i.test(e.subject), reason: "seek-confirmation" },
+    // SEEK application confirmations - with extraction
+    {
+      field: "from",
+      pattern: /seek/i,
+      condition: (e) => /application.*(successfully )?(submitted|sent|received)/i.test(e.subject),
+      reason: "seek-confirmation",
+      extract: (e) => {
+        // Pattern: "your application for {Job Title} was successfully submitted to {Company}"
+        const match = (e.textBody || "").match(/application for\s+(.+?)\s+was\s+(?:successfully\s+)?submitted\s+to\s+(.+?)(?:\.|$)/im);
+        if (match) {
+          return { jobTitle: match[1].trim(), company: match[2].trim() };
+        }
+        return {};
+      }
+    },
     { field: "subject", pattern: /your application was successfully submitted/i, reason: "application-submitted" },
   ],
 
@@ -193,7 +206,7 @@ const CLASSIFICATION_RULES = {
 
 /**
  * Rule-based pre-classifier
- * Returns { type, confidence, reason, ruleMatched: true } or null if no rule matches
+ * Returns { type, confidence, reason, ruleMatched: true, extractedData? } or null if no rule matches
  */
 function classifyByRules(email) {
   const fields = {
@@ -215,11 +228,16 @@ function classifyByRules(email) {
         if (rule.condition && !rule.condition(email)) {
           continue;
         }
+
+        // Extract data if extractor is defined
+        const extractedData = rule.extract ? rule.extract(email) : {};
+
         return {
           type,
           confidence: 0.95,
           reason: rule.reason,
           ruleMatched: true,
+          extractedData,
         };
       }
     }
