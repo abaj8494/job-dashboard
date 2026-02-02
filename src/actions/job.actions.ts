@@ -28,11 +28,16 @@ export const getJobSourceList = async (): Promise<any | undefined> => {
   }
 };
 
+export type JobSortField = "appliedDate" | "title" | "company" | "location" | "status" | "source" | "createdAt";
+export type SortOrder = "asc" | "desc";
+
 export const getJobsList = async (
   page: number = 1,
   limit: number = APP_CONSTANTS.RECORDS_PER_PAGE,
   filter?: string,
-  search?: string
+  search?: string,
+  sortBy: JobSortField = "createdAt",
+  sortOrder: SortOrder = "desc"
 ): Promise<any | undefined> => {
   try {
     const user = await getCurrentUser();
@@ -68,6 +73,17 @@ export const getJobsList = async (
       ];
     }
 
+    // Build orderBy based on sortBy field
+    const orderByMap: Record<JobSortField, any> = {
+      appliedDate: { appliedDate: sortOrder },
+      createdAt: { createdAt: sortOrder },
+      title: { JobTitle: { label: sortOrder } },
+      company: { Company: { label: sortOrder } },
+      location: { Location: { label: sortOrder } },
+      status: { Status: { label: sortOrder } },
+      source: { JobSource: { label: sortOrder } },
+    };
+
     const [data, total] = await Promise.all([
       prisma.job.findMany({
         where: whereClause,
@@ -86,10 +102,7 @@ export const getJobsList = async (
           description: false,
           Resume: true,
         },
-        orderBy: {
-          createdAt: "desc",
-          // appliedDate: "desc",
-        },
+        orderBy: orderByMap[sortBy] || { createdAt: "desc" },
       }),
       prisma.job.count({
         where: whereClause,

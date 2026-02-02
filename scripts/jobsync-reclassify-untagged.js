@@ -16,7 +16,7 @@ const { promisify } = require("util");
 const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
-const { CLASSIFICATION_TYPES, classifyByRules } = require("./lib/classification-rules");
+const { CLASSIFICATION_TYPES, classifyByRules, htmlToText } = require("./lib/classification-rules");
 
 const execAsync = promisify(exec);
 
@@ -132,7 +132,7 @@ async function parseEmailFile(filePath) {
       fromName: parsed.from?.value?.[0]?.name,
       to: toAddress,
       date: parsed.date || new Date(),
-      textBody: parsed.text,
+      textBody: parsed.text || htmlToText(parsed.html),
       htmlBody: parsed.html || undefined,
       isOutbound,
     };

@@ -19,6 +19,7 @@ const { exec } = require("child_process");
 const { promisify } = require("util");
 const { simpleParser } = require("mailparser");
 const fs = require("fs");
+const { htmlToText } = require("./lib/classification-rules");
 
 const execAsync = promisify(exec);
 
@@ -63,7 +64,7 @@ async function parseEmailFile(filePath) {
     return {
       messageId: parsed.messageId,
       subject: parsed.subject || "",
-      textBody: parsed.text || "",
+      textBody: parsed.text || htmlToText(parsed.html) || "",
     };
   } catch (e) {
     log(`Failed to parse ${filePath}: ${e.message}`);

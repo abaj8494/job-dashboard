@@ -8,6 +8,9 @@ import {
   TableRow,
 } from "../ui/table";
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   ListCollapse,
   MoreHorizontal,
   Pencil,
@@ -33,6 +36,7 @@ import {
 import { Button } from "../ui/button";
 import { useState } from "react";
 import { JobResponse, JobStatus } from "@/models/job.model";
+import { type JobSortField, type SortOrder } from "@/actions/job.actions";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { DeleteAlertDialog } from "../DeleteAlertDialog";
@@ -43,7 +47,40 @@ type MyJobsTableProps = {
   deleteJob: (id: string) => void;
   editJob: (id: string) => void;
   onChangeJobStatus: (id: string, status: JobStatus) => void;
+  sortBy: JobSortField;
+  sortOrder: SortOrder;
+  onSort: (field: JobSortField) => void;
 };
+
+interface SortableHeaderProps {
+  field: JobSortField;
+  label: string;
+  currentSort: JobSortField;
+  sortOrder: SortOrder;
+  onSort: (field: JobSortField) => void;
+  className?: string;
+}
+
+function SortableHeader({ field, label, currentSort, sortOrder, onSort, className }: SortableHeaderProps) {
+  const isActive = currentSort === field;
+  return (
+    <button
+      onClick={() => onSort(field)}
+      className={cn("flex items-center gap-1 hover:text-foreground transition-colors", className)}
+    >
+      {label}
+      {isActive ? (
+        sortOrder === "asc" ? (
+          <ArrowUp className="h-3 w-3" />
+        ) : (
+          <ArrowDown className="h-3 w-3" />
+        )
+      ) : (
+        <ArrowUpDown className="h-3 w-3 opacity-50" />
+      )}
+    </button>
+  );
+}
 
 function MyJobsTable({
   jobs,
@@ -51,6 +88,9 @@ function MyJobsTable({
   deleteJob,
   editJob,
   onChangeJobStatus,
+  sortBy,
+  sortOrder,
+  onSort,
 }: MyJobsTableProps) {
   const [alertOpen, setAlertOpen] = useState(false);
   const [jobIdToDelete, setJobIdToDelete] = useState("");
@@ -73,12 +113,24 @@ function MyJobsTable({
             <TableHead className="hidden w-[100px] sm:table-cell">
               <span className="sr-only">Company Logo</span>
             </TableHead>
-            <TableHead className="hidden md:table-cell">Date Applied</TableHead>
-            <TableHead>Title</TableHead>
-            <TableHead>Company</TableHead>
-            <TableHead className="hidden md:table-cell">Location</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead className="hidden md:table-cell">Source</TableHead>
+            <TableHead className="hidden md:table-cell">
+              <SortableHeader field="appliedDate" label="Date Applied" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
+            <TableHead>
+              <SortableHeader field="title" label="Title" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
+            <TableHead>
+              <SortableHeader field="company" label="Company" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
+            <TableHead className="hidden md:table-cell">
+              <SortableHeader field="location" label="Location" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
+            <TableHead>
+              <SortableHeader field="status" label="Status" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
+            <TableHead className="hidden md:table-cell">
+              <SortableHeader field="source" label="Source" currentSort={sortBy} sortOrder={sortOrder} onSort={onSort} />
+            </TableHead>
             <TableHead>
               <span className="sr-only">Actions</span>
             </TableHead>

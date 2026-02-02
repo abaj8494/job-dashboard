@@ -24,7 +24,7 @@ const { promisify } = require("util");
 const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
-const { CLASSIFICATION_TYPES, isHighVarianceCorrection } = require("./lib/classification-rules");
+const { CLASSIFICATION_TYPES, isHighVarianceCorrection, htmlToText } = require("./lib/classification-rules");
 
 const execAsync = promisify(exec);
 
@@ -113,7 +113,7 @@ async function parseEmailForCorrection(filePath) {
       date: parsed.date || new Date(),
       isOutbound,
       bodyPreview: (parsed.text || "").substring(0, 1000),
-      textBody: parsed.text || "", // Full text for rule checking
+      textBody: parsed.text || htmlToText(parsed.html) || "", // Full text for rule checking
       htmlBody: parsed.html || undefined,
     };
   } catch (e) {

@@ -264,9 +264,51 @@ function isHighVarianceCorrection(email, originalType, correctedType) {
   return true;
 }
 
+/**
+ * Convert HTML to plain text (fallback when email has no text/plain part)
+ */
+function htmlToText(html) {
+  if (!html) return "";
+
+  return html
+    // Remove style and script tags and their content
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    // Replace common block elements with newlines
+    .replace(/<\/(p|div|h[1-6]|li|tr|br)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    // Replace list items with bullet points
+    .replace(/<li[^>]*>/gi, "• ")
+    // Remove all remaining HTML tags
+    .replace(/<[^>]+>/g, "")
+    // Decode common HTML entities
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&rsquo;/gi, "'")
+    .replace(/&lsquo;/gi, "'")
+    .replace(/&rdquo;/gi, '"')
+    .replace(/&ldquo;/gi, '"')
+    .replace(/&ndash;/gi, "–")
+    .replace(/&mdash;/gi, "—")
+    // Collapse multiple newlines
+    .replace(/\n{3,}/g, "\n\n")
+    // Collapse multiple spaces
+    .replace(/[ \t]+/g, " ")
+    // Trim each line
+    .split("\n")
+    .map(line => line.trim())
+    .join("\n")
+    .trim();
+}
+
 module.exports = {
   CLASSIFICATION_TYPES,
   CLASSIFICATION_RULES,
   classifyByRules,
   isHighVarianceCorrection,
+  htmlToText,
 };

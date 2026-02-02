@@ -14,7 +14,7 @@ const { promisify } = require("util");
 const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
-const { CLASSIFICATION_TYPES, classifyByRules } = require("./lib/classification-rules");
+const { CLASSIFICATION_TYPES, classifyByRules, htmlToText } = require("./lib/classification-rules");
 
 const execAsync = promisify(exec);
 
@@ -34,7 +34,7 @@ const LOG_FILE = path.join(JOBSYNC_DIR, "local-sync.log");
 const CORRECTIONS_FILE = path.join(JOBSYNC_DIR, "corrections.json");
 const IS_TTY = process.stdout.isTTY;
 
-// CLASSIFICATION_TYPES and classifyByRules imported from ./lib/classification-rules.js
+// CLASSIFICATION_TYPES, classifyByRules, htmlToText imported from ./lib/classification-rules.js
 
 function log(message) {
   const timestamp = new Date().toISOString();
@@ -201,6 +201,9 @@ async function parseEmailFile(filePath) {
       (email) => fromAddress.toLowerCase() === email.toLowerCase()
     );
 
+    // Use text/plain if available, otherwise convert HTML to text
+    const textBody = parsed.text || htmlToText(parsed.html);
+
     return {
       messageId: parsed.messageId || `generated-${Date.now()}-${Math.random()}`,
       subject: parsed.subject || "(No subject)",
@@ -208,7 +211,7 @@ async function parseEmailFile(filePath) {
       fromName: parsed.from?.value?.[0]?.name,
       to: toAddress,
       date: parsed.date || new Date(),
-      textBody: parsed.text,
+      textBody,
       htmlBody: parsed.html || undefined,
       isOutbound,
     };

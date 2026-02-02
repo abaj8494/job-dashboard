@@ -15,6 +15,8 @@ import {
   getJobDetails,
   getJobsList,
   updateJobStatus,
+  type JobSortField,
+  type SortOrder,
 } from "@/actions/job.actions";
 import { toast } from "../ui/use-toast";
 import {
@@ -81,18 +83,22 @@ function JobsContainer({
   const [recordsPerPage, setRecordsPerPage] = useState<number>(
     APP_CONSTANTS.RECORDS_PER_PAGE,
   );
+  const [sortBy, setSortBy] = useState<JobSortField>("createdAt");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
   const hasSearched = useRef(false);
 
   const jobsPerPage = recordsPerPage;
 
   const loadJobs = useCallback(
-    async (page: number, filter?: string, search?: string) => {
+    async (page: number, filter?: string, search?: string, sort?: JobSortField, order?: SortOrder) => {
       setLoading(true);
       const { success, data, total, message } = await getJobsList(
         page,
         jobsPerPage,
         filter,
-        search
+        search,
+        sort || sortBy,
+        order || sortOrder
       );
       if (success && data) {
         setJobs((prev) => (page === 1 ? data : [...prev, ...data]));
@@ -109,15 +115,19 @@ function JobsContainer({
         return;
       }
     },
-    [jobsPerPage]
+    [jobsPerPage, sortBy, sortOrder]
   );
 
   const reloadJobs = useCallback(async () => {
-    await loadJobs(1, undefined, searchTerm || undefined);
-    if (filterKey) {
-      setFilterKey(undefined);
-    }
+    await loadJobs(1, filterKey, searchTerm || undefined);
   }, [loadJobs, filterKey, searchTerm]);
+
+  const handleSort = (field: JobSortField) => {
+    const newOrder = sortBy === field && sortOrder === "desc" ? "asc" : "desc";
+    setSortBy(field);
+    setSortOrder(newOrder);
+    loadJobs(1, filterKey, searchTerm || undefined, field, newOrder);
+  };
 
   const onDeleteJob = async (jobId: string) => {
     const { res, success, message } = await deleteJobById(jobId);
@@ -301,6 +311,9 @@ function JobsContainer({
                 deleteJob={onDeleteJob}
                 editJob={onEditJob}
                 onChangeJobStatus={onChangeJobStatus}
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
               />
               <div className="flex items-center justify-between mt-4">
                 <RecordsCount
