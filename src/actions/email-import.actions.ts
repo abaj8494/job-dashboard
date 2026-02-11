@@ -374,3 +374,96 @@ export const restoreToPending = async (importId: string) => {
     return handleError(error, "Failed to restore email import");
   }
 };
+
+/**
+ * Link email import to existing job and update job status
+ */
+export const linkToExistingJob = async (
+  importId: string,
+  jobId: string,
+  newStatusId: string
+) => {
+  try {
+    const user = await getCurrentUser();
+    if (!user) {
+      throw new Error("Not authenticated");
+    }
+
+    const emailImport = await prisma.emailImport.findUnique({
+      where: { id: importId, userId: user.id },
+    });
+
+    if (!emailImport) {
+      return { success: false, message: "Import not found" };
+    }
+
+    // Verify job belongs to user
+    const job = await prisma.job.findUnique({
+      where: { id: jobId, userId: user.id },
+      include: { Company: true, JobTitle: true, Status: true },
+    });
+
+    if (!job) {
+      return { success: false, message: "Job not found" };
+    }
+
+    // Update job status and link email import in transaction
+    await prisma.$transaction(async (tx) => {
+      await tx.job.update({
+        where: { id: jobId },
+        data: {
+          statusId: newStatusId,
+        },
+      });
+
+      await tx.emailImport.update({
+        where: { id: importId },
+        data: {
+          status: "approved",
+          jobId: jobId,
+          reviewedAt: new Date(),
+        },
+      });
+    });
+
+    revalidatePath("/dashboard/email-imports");
+    revalidatePath("/dashboard/myjobs");
+
+    return { success: true, job };
+  } catch (error) {
+    return handleError(error, "Failed to link email to job");
+  }
+};
+
+/**
+ * Search jobs for linking (used in email import review)
+ */
+export const searchJobsForLinking = async (search: string) => {
+  try {
+    const user = await getCurrentUser();
+    if (!user) {
+      throw new Error("Not authenticated");
+    }
+
+    const jobs = await prisma.job.findMany({
+      where: {
+        userId: user.id,
+        OR: [
+          { JobTitle: { label: { contains: search } } },
+          { Company: { label: { contains: search } } },
+        ],
+      },
+      take: 10,
+      orderBy: { createdAt: "desc" },
+      include: {
+        Company: { select: { label: true } },
+        JobTitle: { select: { label: true } },
+        Status: { select: { id: true, label: true, value: true } },
+      },
+    });
+
+    return { success: true, data: jobs };
+  } catch (error) {
+    return handleError(error, "Failed to search jobs");
+  }
+};

@@ -25,12 +25,14 @@ import { ScrollArea } from "../ui/scroll-area";
 import { Separator } from "../ui/separator";
 import { Switch } from "../ui/switch";
 import { format } from "date-fns";
-import { Mail, Send, Building2, Briefcase, MapPin, CheckCircle, XCircle, SkipForward } from "lucide-react";
+import { Mail, Send, Building2, Briefcase, MapPin, CheckCircle, XCircle, SkipForward, Link2, Search } from "lucide-react";
 import {
   type EmailImportListItem,
   approveEmailImport,
   rejectEmailImport,
   skipEmailImport,
+  searchJobsForLinking,
+  linkToExistingJob,
 } from "@/actions/email-import.actions";
 import { addCompany } from "@/actions/company.actions";
 import { createJobTitle } from "@/actions/jobtitle.actions";
@@ -103,6 +105,18 @@ function EmailImportReview({
   const [creatingCompany, setCreatingCompany] = useState(false);
   const [creatingTitle, setCreatingTitle] = useState(false);
   const [creatingLocation, setCreatingLocation] = useState(false);
+
+  // Link to existing job
+  const [jobSearchQuery, setJobSearchQuery] = useState("");
+  const [jobSearchResults, setJobSearchResults] = useState<Array<{
+    id: string;
+    Company: { label: string } | null;
+    JobTitle: { label: string } | null;
+    Status: { id: string; label: string; value: string } | null;
+  }>>([]);
+  const [selectedJobId, setSelectedJobId] = useState<string>("");
+  const [linkStatusId, setLinkStatusId] = useState<string>("");
+  const [searchingJobs, setSearchingJobs] = useState(false);
 
   // Parse extracted data - memoize to prevent useEffect from running on every render
   const extractedData: ExtractedData = useMemo(() => {
@@ -319,6 +333,52 @@ function EmailImportReview({
     setLoading(false);
   };
 
+  const handleJobSearch = async (query: string) => {
+    setJobSearchQuery(query);
+    if (query.length < 2) {
+      setJobSearchResults([]);
+      return;
+    }
+    setSearchingJobs(true);
+    const result = await searchJobsForLinking(query);
+    if (result?.success && "data" in result && result.data) {
+      setJobSearchResults(result.data);
+    }
+    setSearchingJobs(false);
+  };
+
+  const handleLinkToJob = async () => {
+    if (!emailImport || !selectedJobId || !linkStatusId) return;
+    setLoading(true);
+    const result = await linkToExistingJob(emailImport.id, selectedJobId, linkStatusId);
+    if (result?.success) {
+      toast({ title: "Job status updated and email linked" });
+      if (onNext) {
+        onNext();
+      } else {
+        onComplete();
+      }
+    } else {
+      toast({ title: "Error", description: (result as { message?: string })?.message || "Failed to link", variant: "destructive" });
+    }
+    setLoading(false);
+  };
+
+  // When a job is selected, auto-set the status based on email classification
+  const handleSelectJob = (jobId: string) => {
+    setSelectedJobId(jobId);
+    // Set status based on classification
+    const statusMap: Record<string, string> = {
+      interview: "interview",
+      rejection: "rejected",
+      offer: "offer",
+      job_response: "applied",
+    };
+    const suggestedStatus = statusMap[emailImport?.classification || ""] || "";
+    const matchedStatus = statuses.find((s) => s.value === suggestedStatus);
+    setLinkStatusId(matchedStatus?.id || "");
+  };
+
   if (!emailImport) return null;
 
   return (
@@ -344,8 +404,9 @@ function EmailImportReview({
         </DialogHeader>
 
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="details">Job Details</TabsTrigger>
+          <TabsList className="grid w-full grid-cols-3">
+            <TabsTrigger value="details">Create Job</TabsTrigger>
+            <TabsTrigger value="link">Update Existing</TabsTrigger>
             <TabsTrigger value="email">Email Content</TabsTrigger>
           </TabsList>
 
@@ -567,6 +628,98 @@ function EmailImportReview({
             </ScrollArea>
           </TabsContent>
 
+          <TabsContent value="link" className="mt-4">
+            <ScrollArea className="h-[400px] pr-4">
+              <div className="space-y-4">
+                {/* Email Summary */}
+                <div className="bg-muted p-4 rounded-lg">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <p className="font-medium">{emailImport.subject}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {format(new Date(emailImport.emailDate), "PPP")}
+                      </p>
+                    </div>
+                    <Badge>{emailImport.classification.replace("_", " ")}</Badge>
+                  </div>
+                </div>
+
+                <Separator />
+
+                {/* Job Search */}
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-2">
+                    <Search className="h-4 w-4" />
+                    Search for existing job
+                  </Label>
+                  <Input
+                    placeholder="Search by company or job title..."
+                    value={jobSearchQuery}
+                    onChange={(e) => handleJobSearch(e.target.value)}
+                  />
+                </div>
+
+                {/* Search Results */}
+                {searchingJobs ? (
+                  <div className="text-sm text-muted-foreground text-center py-4">
+                    Searching...
+                  </div>
+                ) : jobSearchResults.length > 0 ? (
+                  <div className="space-y-2">
+                    <Label>Select a job to update</Label>
+                    <div className="space-y-2 max-h-[200px] overflow-y-auto">
+                      {jobSearchResults.map((job) => (
+                        <div
+                          key={job.id}
+                          onClick={() => handleSelectJob(job.id)}
+                          className={`p-3 rounded-lg border cursor-pointer transition-colors ${
+                            selectedJobId === job.id
+                              ? "border-primary bg-primary/5"
+                              : "border-border hover:bg-muted"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="font-medium">{job.JobTitle?.label}</p>
+                              <p className="text-sm text-muted-foreground">
+                                {job.Company?.label}
+                              </p>
+                            </div>
+                            <Badge variant="outline">{job.Status?.label}</Badge>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : jobSearchQuery.length >= 2 ? (
+                  <div className="text-sm text-muted-foreground text-center py-4">
+                    No jobs found
+                  </div>
+                ) : null}
+
+                {/* Status Selection */}
+                {selectedJobId && (
+                  <div className="space-y-2 pt-2">
+                    <Separator />
+                    <Label>Update job status to</Label>
+                    <Select value={linkStatusId} onValueChange={setLinkStatusId}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select new status" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {statuses.map((s) => (
+                          <SelectItem key={s.id} value={s.id}>
+                            {s.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
+          </TabsContent>
+
           <TabsContent value="email" className="mt-4">
             <ScrollArea className="h-[400px]">
               <div className="space-y-4 pr-4 max-w-full overflow-hidden">
@@ -606,13 +759,23 @@ function EmailImportReview({
               Reject
             </Button>
           </div>
-          <Button
-            onClick={handleApprove}
-            disabled={loading || emailImport.status !== "pending"}
-          >
-            <CheckCircle className="h-4 w-4 mr-1" />
-            {loading ? "Creating..." : "Create Job"}
-          </Button>
+          {activeTab === "link" ? (
+            <Button
+              onClick={handleLinkToJob}
+              disabled={loading || !selectedJobId || !linkStatusId || emailImport.status !== "pending"}
+            >
+              <Link2 className="h-4 w-4 mr-1" />
+              {loading ? "Updating..." : "Update Job Status"}
+            </Button>
+          ) : (
+            <Button
+              onClick={handleApprove}
+              disabled={loading || emailImport.status !== "pending"}
+            >
+              <CheckCircle className="h-4 w-4 mr-1" />
+              {loading ? "Creating..." : "Create Job"}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

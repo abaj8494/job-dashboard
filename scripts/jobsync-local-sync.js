@@ -15,6 +15,7 @@ const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
 const { CLASSIFICATION_TYPES, classifyByRules, htmlToText } = require("./lib/classification-rules");
+const { extractByRules, mergeExtractedData, needsLLMFallback, buildExtractionPrompt, parseLLMResponse } = require("./lib/extraction-rules");
 
 const execAsync = promisify(exec);
 
@@ -303,6 +304,46 @@ function isJobRelated(classification) {
   return classification.type !== "other";
 }
 
+/**
+ * Extract metadata using rules, with optional LLM fallback
+ */
+async function extractMetadata(email, useLLMFallback = true) {
+  // First try rule-based extraction
+  let extracted = extractByRules(email);
+
+  // If missing critical fields and LLM fallback is enabled, use Ollama
+  if (useLLMFallback && needsLLMFallback(extracted)) {
+    const prompt = buildExtractionPrompt(email);
+    try {
+      const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          prompt,
+          stream: false,
+          options: {
+            temperature: 0.1,
+            num_predict: 200,
+          },
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const llmExtracted = parseLLMResponse(data.response);
+        if (llmExtracted) {
+          extracted = mergeExtractedData(extracted, llmExtracted);
+        }
+      }
+    } catch (error) {
+      // LLM extraction failed, continue with rule-based results
+    }
+  }
+
+  return extracted;
+}
+
 async function sendToServer(imports) {
   try {
     const response = await fetch(JOBSYNC_API_URL, {
@@ -362,6 +403,15 @@ async function processOneEmail(filePath, index, total, corrections = []) {
     return { status: "skipped", reason: "not job-related", source: classificationSource };
   }
 
+  // Extract comprehensive metadata using rules + LLM fallback
+  const ruleExtracted = await extractMetadata(parsed, true);
+
+  // Merge with any LLM-extracted data from classification (prefer rule-based)
+  const extractedData = mergeExtractedData(
+    classification.extractedData || {},
+    ruleExtracted
+  );
+
   await markEmailProcessed(parsed.messageId, classification.type);
   return {
     status: "job_related",
@@ -378,7 +428,7 @@ async function processOneEmail(filePath, index, total, corrections = []) {
       classification: classification.type,
       confidence: classification.confidence,
       isOutbound: parsed.isOutbound,
-      extractedData: classification.extractedData || {},
+      extractedData,
     },
   };
 }

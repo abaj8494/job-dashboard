@@ -95,6 +95,11 @@ function MyJobsTable({
   const [alertOpen, setAlertOpen] = useState(false);
   const [jobIdToDelete, setJobIdToDelete] = useState("");
 
+  // Status context menu state
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+  const [statusMenuPosition, setStatusMenuPosition] = useState({ x: 0, y: 0 });
+  const [selectedJobForStatus, setSelectedJobForStatus] = useState<JobResponse | null>(null);
+
   const router = useRouter();
   const viewJobDetails = (jobId: string) => {
     router.push(`/dashboard/myjobs/${jobId}`);
@@ -103,6 +108,26 @@ function MyJobsTable({
   const onDeleteJob = (jobId: string) => {
     setAlertOpen(true);
     setJobIdToDelete(jobId);
+  };
+
+  const handleRowClick = (e: React.MouseEvent, job: JobResponse) => {
+    // Don't open if clicking on a link or button
+    const target = e.target as HTMLElement;
+    if (target.closest('a') || target.closest('button') || target.closest('[role="menuitem"]')) {
+      return;
+    }
+    e.preventDefault();
+    setSelectedJobForStatus(job);
+    setStatusMenuPosition({ x: e.clientX, y: e.clientY });
+    setStatusMenuOpen(true);
+  };
+
+  const handleStatusChange = (status: JobStatus) => {
+    if (selectedJobForStatus) {
+      onChangeJobStatus(selectedJobForStatus.id, status);
+      setStatusMenuOpen(false);
+      setSelectedJobForStatus(null);
+    }
   };
 
   return (
@@ -139,7 +164,11 @@ function MyJobsTable({
         <TableBody>
           {jobs.map((job: JobResponse) => {
             return (
-              <TableRow key={job.id}>
+              <TableRow
+                key={job.id}
+                className="cursor-pointer"
+                onClick={(e) => handleRowClick(e, job)}
+              >
                 <TableCell className="hidden sm:table-cell">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
@@ -277,6 +306,51 @@ function MyJobsTable({
         onOpenChange={setAlertOpen}
         onDelete={() => deleteJob(jobIdToDelete)}
       />
+      {/* Status Context Menu */}
+      {statusMenuOpen && (
+        <>
+          {/* Backdrop to close menu on click outside */}
+          <div
+            className="fixed inset-0 z-50"
+            onClick={() => setStatusMenuOpen(false)}
+          />
+          {/* Floating status menu */}
+          <div
+            className="fixed z-50 min-w-[180px] bg-popover text-popover-foreground rounded-md border shadow-md p-1"
+            style={{
+              left: statusMenuPosition.x,
+              top: statusMenuPosition.y,
+              transform: 'translate(-50%, 0)',
+            }}
+          >
+            <div className="px-2 py-1.5 text-sm font-semibold text-muted-foreground">
+              Change Status
+            </div>
+            <div className="h-px bg-border my-1" />
+            {selectedJobForStatus && (
+              <div className="px-2 py-1 text-xs text-muted-foreground mb-1">
+                {selectedJobForStatus.JobTitle?.label} @ {selectedJobForStatus.Company?.label}
+              </div>
+            )}
+            {jobStatuses.map((status) => (
+              <button
+                key={status.id}
+                className={cn(
+                  "relative flex w-full cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground",
+                  status.id === selectedJobForStatus?.Status?.id && "bg-accent/50"
+                )}
+                onClick={() => handleStatusChange(status)}
+                disabled={status.id === selectedJobForStatus?.Status?.id}
+              >
+                {status.label}
+                {status.id === selectedJobForStatus?.Status?.id && (
+                  <span className="ml-auto text-xs text-muted-foreground">(current)</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </>
   );
 }
