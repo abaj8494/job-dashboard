@@ -467,3 +467,37 @@ export const searchJobsForLinking = async (search: string) => {
     return handleError(error, "Failed to search jobs");
   }
 };
+
+/**
+ * Get active jobs for linking (excludes rejected/offer statuses)
+ */
+export const getActiveJobsForLinking = async () => {
+  try {
+    const user = await getCurrentUser();
+    if (!user) {
+      throw new Error("Not authenticated");
+    }
+
+    const jobs = await prisma.job.findMany({
+      where: {
+        userId: user.id,
+        Status: {
+          value: {
+            notIn: ["rejected", "offer"],
+          },
+        },
+      },
+      take: 50,
+      orderBy: { createdAt: "desc" },
+      include: {
+        Company: { select: { label: true } },
+        JobTitle: { select: { label: true } },
+        Status: { select: { id: true, label: true, value: true } },
+      },
+    });
+
+    return { success: true, data: jobs };
+  } catch (error) {
+    return handleError(error, "Failed to fetch active jobs");
+  }
+};

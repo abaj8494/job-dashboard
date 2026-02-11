@@ -33,6 +33,7 @@ import {
   skipEmailImport,
   searchJobsForLinking,
   linkToExistingJob,
+  getActiveJobsForLinking,
 } from "@/actions/email-import.actions";
 import { addCompany } from "@/actions/company.actions";
 import { createJobTitle } from "@/actions/jobtitle.actions";
@@ -108,6 +109,12 @@ function EmailImportReview({
 
   // Link to existing job
   const [jobSearchQuery, setJobSearchQuery] = useState("");
+  const [activeJobs, setActiveJobs] = useState<Array<{
+    id: string;
+    Company: { label: string } | null;
+    JobTitle: { label: string } | null;
+    Status: { id: string; label: string; value: string } | null;
+  }>>([]);
   const [jobSearchResults, setJobSearchResults] = useState<Array<{
     id: string;
     Company: { label: string } | null;
@@ -116,6 +123,7 @@ function EmailImportReview({
   }>>([]);
   const [selectedJobId, setSelectedJobId] = useState<string>("");
   const [linkStatusId, setLinkStatusId] = useState<string>("");
+  const [loadingActiveJobs, setLoadingActiveJobs] = useState(false);
   const [searchingJobs, setSearchingJobs] = useState(false);
 
   // Parse extracted data - memoize to prevent useEffect from running on every render
@@ -178,6 +186,29 @@ function EmailImportReview({
       setActiveTab("details");
     }
   }, [emailImport, open, companies, titles, locations, statuses, extractedData]);
+
+  // Load active jobs when dialog opens or switching to link tab
+  useEffect(() => {
+    if (open && activeTab === "link" && activeJobs.length === 0) {
+      setLoadingActiveJobs(true);
+      getActiveJobsForLinking().then((result) => {
+        if (result?.success && "data" in result && result.data) {
+          setActiveJobs(result.data);
+        }
+        setLoadingActiveJobs(false);
+      });
+    }
+  }, [open, activeTab, activeJobs.length]);
+
+  // Reset link state when dialog closes
+  useEffect(() => {
+    if (!open) {
+      setJobSearchQuery("");
+      setJobSearchResults([]);
+      setSelectedJobId("");
+      setLinkStatusId("");
+    }
+  }, [open]);
 
   const handleCreateCompany = async () => {
     if (!newCompanyName) return;
@@ -646,29 +677,44 @@ function EmailImportReview({
 
                 <Separator />
 
-                {/* Job Search */}
+                {/* Filter/Search */}
                 <div className="space-y-2">
                   <Label className="flex items-center gap-2">
                     <Search className="h-4 w-4" />
-                    Search for existing job
+                    Filter jobs
                   </Label>
                   <Input
-                    placeholder="Search by company or job title..."
+                    placeholder="Type to filter or search..."
                     value={jobSearchQuery}
                     onChange={(e) => handleJobSearch(e.target.value)}
                   />
                 </div>
 
-                {/* Search Results */}
-                {searchingJobs ? (
+                {/* Jobs List */}
+                {loadingActiveJobs ? (
+                  <div className="text-sm text-muted-foreground text-center py-4">
+                    Loading jobs...
+                  </div>
+                ) : searchingJobs ? (
                   <div className="text-sm text-muted-foreground text-center py-4">
                     Searching...
                   </div>
-                ) : jobSearchResults.length > 0 ? (
+                ) : (
                   <div className="space-y-2">
-                    <Label>Select a job to update</Label>
+                    <Label>
+                      {jobSearchQuery.length >= 2
+                        ? `Search results (${jobSearchResults.length})`
+                        : `Active jobs (${activeJobs.length})`
+                      }
+                    </Label>
                     <div className="space-y-2 max-h-[200px] overflow-y-auto">
-                      {jobSearchResults.map((job) => (
+                      {(jobSearchQuery.length >= 2 ? jobSearchResults : activeJobs
+                        .filter(job =>
+                          !jobSearchQuery ||
+                          job.JobTitle?.label.toLowerCase().includes(jobSearchQuery.toLowerCase()) ||
+                          job.Company?.label.toLowerCase().includes(jobSearchQuery.toLowerCase())
+                        )
+                      ).map((job) => (
                         <div
                           key={job.id}
                           onClick={() => handleSelectJob(job.id)}
@@ -689,13 +735,14 @@ function EmailImportReview({
                           </div>
                         </div>
                       ))}
+                      {(jobSearchQuery.length >= 2 ? jobSearchResults : activeJobs).length === 0 && (
+                        <div className="text-sm text-muted-foreground text-center py-4">
+                          {jobSearchQuery.length >= 2 ? "No jobs found" : "No active jobs"}
+                        </div>
+                      )}
                     </div>
                   </div>
-                ) : jobSearchQuery.length >= 2 ? (
-                  <div className="text-sm text-muted-foreground text-center py-4">
-                    No jobs found
-                  </div>
-                ) : null}
+                )}
 
                 {/* Status Selection */}
                 {selectedJobId && (
