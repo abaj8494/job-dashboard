@@ -244,7 +244,7 @@ model Job {
   Interview   Interview[]
   Resume      Resume?      @relation(fields: [resumeId], references: [id])
   resumeId    String?
-  EmailImport EmailImport?
+  emailImports EmailImport[]
 }
 
 model ActivityType {
@@ -342,7 +342,7 @@ model EmailImport {
   // Review status
   status     String    @default("pending") // pending, approved, rejected, skipped
   reviewedAt DateTime?
-  jobId      String?   @unique
+  jobId      String?
   job        Job?      @relation(fields: [jobId], references: [id])
 
   createdAt DateTime @default(now())
