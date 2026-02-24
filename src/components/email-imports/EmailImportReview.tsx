@@ -400,14 +400,16 @@ function EmailImportReview({
     setSelectedJobId(jobId);
     // Set status based on classification
     const statusMap: Record<string, string> = {
+      job_application: "applied",
+      job_response: "applied",
       interview: "interview",
       rejection: "rejected",
       offer: "offer",
-      job_response: "applied",
+      follow_up: "applied",
     };
-    const suggestedStatus = statusMap[emailImport?.classification || ""] || "";
+    const suggestedStatus = statusMap[emailImport?.classification || ""] || "applied";
     const matchedStatus = statuses.find((s) => s.value === suggestedStatus);
-    setLinkStatusId(matchedStatus?.id || "");
+    setLinkStatusId(matchedStatus?.id || statuses[0]?.id || "");
   };
 
   if (!emailImport) return null;
