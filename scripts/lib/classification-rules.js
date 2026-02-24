@@ -25,6 +25,31 @@ const CLASSIFICATION_RULES = {
   // OTHER (not job-related) - most common, check first
   // -------------------------------------------------------------------------
   other: [
+    // =========================================================================
+    // PERSONAL EMAILS - Must be checked FIRST (highest priority)
+    // =========================================================================
+
+    // Outbound emails to personal domains (user emailing friends)
+    {
+      field: "isOutbound",
+      pattern: /true/i,
+      condition: (e) => {
+        const to = (e.to || "").toLowerCase();
+        const personalDomains = ['gmail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'icloud.com', 'protonmail.com', 'fastmail.com'];
+        const isToPersonal = personalDomains.some(d => to.includes(d));
+        const isToRecruitment = /(careers|jobs|recruiting|talent|hr|hiring|apply)@/i.test(to);
+        return isToPersonal && !isToRecruitment;
+      },
+      reason: "personal-outbound"
+    },
+
+    // Casual subject lines (regardless of direction)
+    { field: "subject", pattern: /^(re:|fwd:)?\s*(yo|hey man|hey dude|sup|check this out|omg|lol|haha|btw)/i, reason: "casual-language" },
+
+    // Sharing content with friends
+    { field: "subject", pattern: /^(re:|fwd:)?\s*(look at this|you gotta see|thought you|you'll love)/i, reason: "personal-share" },
+
+    // =========================================================================
     // Job alert digests (NOT applications or responses)
     { field: "from", pattern: /jobnotification@/i, reason: "job-alert-sender" },
     { field: "from", pattern: /jobs2web\.com/i, reason: "job-alert-sender" },
@@ -128,22 +153,71 @@ const CLASSIFICATION_RULES = {
     // NinjaTech, Neara, etc.
     { field: "subject", pattern: /received your job application/i, reason: "received-job-app" },
 
+  ],
+
+  // -------------------------------------------------------------------------
+  // JOB_APPLICATION (job board confirmations - NOT company responses)
+  // These are from SEEK/LinkedIn/Indeed confirming the USER submitted an application
+  // -------------------------------------------------------------------------
+  job_application: [
     // SEEK application confirmations - with extraction
     {
       field: "from",
       pattern: /seek/i,
-      condition: (e) => /application.*(successfully )?(submitted|sent|received)/i.test(e.subject),
+      condition: (e) => /application.*(successfully )?(submitted|sent)/i.test(e.subject),
       reason: "seek-confirmation",
       extract: (e) => {
-        // Pattern: "your application for {Job Title} was successfully submitted to {Company}"
-        const match = (e.textBody || "").match(/application for\s+(.+?)\s+was\s+(?:successfully\s+)?submitted\s+to\s+(.+?)(?:\.|$)/im);
-        if (match) {
-          return { jobTitle: match[1].trim(), company: match[2].trim() };
+        const text = e.textBody || "";
+        // Try multiple patterns for SEEK email variations
+        const patterns = [
+          /application for\s+(.+?)\s+was\s+(?:successfully\s+)?submitted\s+to\s+(.+?)(?:\.|!|\n|$)/im,
+          /your\s+application\s+for\s+(.+?)\s+(?:has been|was)\s+(?:successfully\s+)?submitted\s+to\s+(.+?)(?:\.|!|\n|$)/im,
+          /submitted\s+(?:your\s+)?application\s+for\s+(.+?)\s+to\s+(.+?)(?:\.|!|\n|$)/im,
+        ];
+        for (const pattern of patterns) {
+          const match = text.match(pattern);
+          if (match) {
+            return {
+              jobTitle: match[1].trim().replace(/\s+/g, ' '),
+              company: match[2].trim().replace(/\s+/g, ' '),
+              source: 'SEEK'
+            };
+          }
         }
-        return {};
+        return { source: 'SEEK' };
       }
     },
-    { field: "subject", pattern: /your application was successfully submitted/i, reason: "application-submitted" },
+    { field: "subject", pattern: /your application was successfully submitted/i, reason: "seek-submitted" },
+
+    // LinkedIn application confirmations
+    {
+      field: "from",
+      pattern: /linkedin/i,
+      condition: (e) => /you applied|your application was sent|application submitted/i.test(e.subject),
+      reason: "linkedin-confirmation",
+      extract: (e) => {
+        const text = e.textBody || "";
+        // LinkedIn: "You applied for [Job] at [Company]"
+        const match = text.match(/(?:you )?applied (?:for )?(.+?)\s+at\s+(.+?)(?:\.|!|\n|$)/im);
+        if (match) {
+          return {
+            jobTitle: match[1].trim().replace(/\s+/g, ' '),
+            company: match[2].trim().replace(/\s+/g, ' '),
+            source: 'LinkedIn'
+          };
+        }
+        return { source: 'LinkedIn' };
+      }
+    },
+
+    // Indeed application confirmations
+    {
+      field: "from",
+      pattern: /indeed/i,
+      condition: (e) => /your application was sent|application submitted|you applied/i.test(e.subject),
+      reason: "indeed-confirmation",
+      extract: (e) => ({ source: 'Indeed' })
+    },
   ],
 
   // -------------------------------------------------------------------------
@@ -211,9 +285,11 @@ const CLASSIFICATION_RULES = {
 function classifyByRules(email) {
   const fields = {
     from: email.from?.toLowerCase() || "",
+    to: email.to?.toLowerCase() || "",
     subject: email.subject?.toLowerCase() || "",
     senderName: email.fromName?.toLowerCase() || "",
     textBody: email.textBody || "",
+    isOutbound: email.isOutbound ? "true" : "false",
   };
 
   // Check rules in priority order

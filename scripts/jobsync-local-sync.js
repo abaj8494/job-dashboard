@@ -223,19 +223,39 @@ async function parseEmailFile(filePath) {
 }
 
 async function classifyWithOllama(email, corrections = []) {
-  const systemPrompt = `You are an email classifier for job search tracking. Classify emails into one of these categories:
-- job_application: Email SENT BY the user applying for a job
-- job_response: Company acknowledging receipt of application
+  const systemPrompt = `You are an email classifier for job search tracking.
+
+## CRITICAL: CHECK PERSONAL EMAILS FIRST
+
+Before classifying as job-related, ask:
+1. Is this TO a personal email (gmail, outlook, etc.) with casual content? -> "other"
+2. Is this outbound to a friend/family member? -> "other"
+3. Does it use casual language (hey, yo, sup, check this out)? -> "other"
+4. Is someone venting about jobs to a friend? -> "other" (NOT a job application!)
+
+Personal emails about jobs are NOT job applications. Only formal communications with companies/recruiters count.
+
+## CLASSIFICATION CATEGORIES
+
+- job_application: Job board confirmation (SEEK, LinkedIn, Indeed) that application was SUBMITTED
+  * Pattern: "Your application for [JOB] was submitted to [COMPANY]"
+- job_response: COMPANY acknowledging receipt (thank you for applying, application received)
 - interview: Interview invitation or scheduling
-- rejection: Application rejected
+- rejection: Application rejected / not moving forward
 - offer: Job offer received
-- follow_up: Follow-up correspondence about an application
-- other: Not job-related
+- follow_up: Follow-up correspondence, next steps
+- other: Not job-related (DEFAULT when uncertain)
 
-Also extract: company name, job title, location, application URL, recruiter name, salary range (if mentioned).
+## EXTRACTION PATTERNS
 
-Respond ONLY with valid JSON in this exact format:
-{"type":"category","confidence":0.95,"extractedData":{"company":"Name","jobTitle":"Title","location":"City","applicationUrl":"url","recruiterName":"Name","salaryRange":"range"}}`;
+For SEEK: "application for [JOB_TITLE] was submitted to [COMPANY]"
+For LinkedIn: "You applied for [JOB_TITLE] at [COMPANY]"
+For company emails: Look for role/position mentioned + company in from/signature
+
+## OUTPUT FORMAT
+
+Respond ONLY with valid JSON:
+{"type":"category","confidence":0.95,"reasoning":"brief explanation","extractedData":{"company":"Name or null","jobTitle":"Title or null","location":"City or null","applicationUrl":"url or null","recruiterName":"Name or null","salaryRange":"range or null","source":"SEEK/LinkedIn/etc or null"}}`;
 
   // Add few-shot examples from corrections if available
   const fewShotExamples = buildFewShotExamples(corrections);
@@ -260,6 +280,10 @@ ${(email.textBody || "(No text body)").substring(0, 3000)}`;
         prompt: `${systemPrompt}\n\n${userPrompt}`,
         stream: false,
         format: "json",
+        options: {
+          temperature: 0.1, // Low temperature for consistent classification
+          num_predict: 400,
+        },
       }),
     });
 
