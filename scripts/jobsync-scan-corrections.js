@@ -24,7 +24,8 @@ const { promisify } = require("util");
 const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
-const { CLASSIFICATION_TYPES, isHighVarianceCorrection, htmlToText } = require("./lib/classification-rules");
+const { CLASSIFICATION_TYPES, isHighVarianceCorrection, htmlToText, classifyByRules } = require("./lib/classification-rules");
+const { extractByRules, buildExtractionPrompt, parseLLMResponse, mergeExtractedData, needsLLMFallback } = require("./lib/extraction-rules");
 
 const execAsync = promisify(exec);
 
@@ -35,6 +36,8 @@ const CORRECTIONS_FILE = path.join(JOBSYNC_DIR, "corrections.json");
 const JOBSYNC_API_URL =
   process.env.JOBSYNC_API_URL || "http://localhost:3000/api/email-sync";
 const JOBSYNC_API_KEY = process.env.JOBSYNC_API_KEY || "";
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
+const OLLAMA_EXTRACTION_MODEL = process.env.OLLAMA_EXTRACTION_MODEL || "qwen2.5:14b";
 
 // High-variance corrections cap (for few-shot learning)
 const MAX_HIGH_VARIANCE_CORRECTIONS = 50;
@@ -394,6 +397,40 @@ async function main() {
     // Handle differently based on original and corrected types
     if (origType === "other" && correctedType !== "other") {
       // "other" -> job-related: email wasn't on server, need to send as new import
+      // Extract metadata using rules + Ollama fallback
+      const ruleClassification = classifyByRules(emailData);
+      let extracted = mergeExtractedData(
+        (ruleClassification || {}).extractedData || {},
+        extractByRules(emailData)
+      );
+
+      // Use Ollama if still missing company or jobTitle
+      if (needsLLMFallback(extracted)) {
+        try {
+          const prompt = buildExtractionPrompt(emailData);
+          const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: OLLAMA_EXTRACTION_MODEL,
+              prompt,
+              stream: false,
+              format: "json",
+              options: { temperature: 0.1, num_predict: 200 },
+            }),
+          });
+          if (response.ok) {
+            const data = await response.json();
+            const llmExtracted = parseLLMResponse(data.response);
+            if (llmExtracted) {
+              extracted = mergeExtractedData(extracted, llmExtracted);
+            }
+          }
+        } catch (e) {
+          // Ollama unavailable, continue with rule-based extraction
+        }
+      }
+
       const importData = {
         messageId: emailData.messageId,
         subject: emailData.subject,
@@ -406,7 +443,7 @@ async function main() {
         classification: correctedType,
         confidence: 1.0, // User-corrected = 100% confidence
         isOutbound: emailData.isOutbound,
-        extractedData: {}, // User can edit on server if needed
+        extractedData: extracted,
       };
       newImportsList.push(importData);
       log(`Promoting from "other": "${emailData.subject.substring(0, 40)}..." -> ${correctedType}`);

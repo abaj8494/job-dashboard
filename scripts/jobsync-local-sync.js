@@ -25,6 +25,7 @@ const JOBSYNC_API_URL =
 const JOBSYNC_API_KEY = process.env.JOBSYNC_API_KEY || "";
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
+const OLLAMA_EXTRACTION_MODEL = process.env.OLLAMA_EXTRACTION_MODEL || "qwen2.5:14b";
 const MONITORED_EMAILS = (
   process.env.MONITORED_EMAILS || "j@abaj.ai,aayushbajaj7@gmail.com"
 ).split(",");
@@ -343,9 +344,10 @@ async function extractMetadata(email, useLLMFallback = true) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: OLLAMA_MODEL,
+          model: OLLAMA_EXTRACTION_MODEL,
           prompt,
           stream: false,
+          format: "json",
           options: {
             temperature: 0.1,
             num_predict: 200,

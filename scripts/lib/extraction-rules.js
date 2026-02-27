@@ -103,114 +103,20 @@ const SOURCE_PATTERNS = {
     ],
   },
 
-  // Greenhouse
-  greenhouse: {
-    company: [
-      /thank(?:s| you) for applying to (.+?)(?:\.|!|$)/im,
-      /application (?:for|to|at) (?:.+? at )?(.+?)(?:\.|$)/im,
-      /(.+?) - Application/im,
-    ],
-    jobTitle: [
-      /applying (?:for|to) (?:the )?(.+?) (?:position|role|opportunity)/im,
-      /application for (?:the )?(.+?) (?:at|position|role)/im,
-      /position:?\s*(.+?)(?:\n|$)/im,
-    ],
-  },
-
-  // Workday
-  workday: {
-    company: [
-      /thank(?:s| you) for (?:your )?interest in (.+?)(?:\.|!|$)/im,
-      /on your (.+?) Application/im,
-      /(.+?) - Application/im,
-      /(.+?) Careers/im,
-    ],
-    jobTitle: [
-      // "for applying for the role of [Job Title]. We'll"
-      /for applying for the role of (.+?)\.\s*We/im,
-      // "for applying for the role of [Job Title]"
-      /for applying for the (?:role|position) of (.+?)(?:\.|!|$)/im,
-      // "position of [Job Title]" with stop words
-      /position of\s*(?:&nbsp;)?(.+?)(?:\s*(?:&nbsp;)?(?:with|at)\s|\.|\s*–|$)/im,
-      // "role of [Job Title]" with stop words
-      /role of\s*(.+?)(?:\.\s*We|\s*with\s|\.|\s*–|$)/im,
-      // "role: [Job Title]" or "job: [Job Title]"
-      /(?:role|job|position):?\s*(.+?)(?:\n|$)/im,
-    ],
-  },
-
-  // Lever
-  lever: {
-    company: [
-      /thank(?:s| you) for applying to (.+?)(?:\.|!|$)/im,
-      /application (?:to|at) (.+?)(?:\.|$)/im,
-    ],
-    jobTitle: [
-      /applying for (?:the )?(.+?) (?:position|role)/im,
-      /application for (?:the )?(.+?)(?:\.|$)/im,
-    ],
-  },
 };
 
 /**
- * Generic extraction patterns (used when source-specific patterns fail)
+ * Generic extraction patterns - kept minimal, Ollama handles the rest
  */
 const GENERIC_PATTERNS = {
-  company: [
-    // "Thank you for applying to/at [Company]"
-    /thank(?:s| you)(?: for)? (?:applying|your (?:interest|application)) (?:to|at|with) (.+?)(?:\.|!|$)/im,
-    // "[Company] has received your application"
-    /(.+?) has received your application/im,
-    // "Your application to [Company]"
-    /your application (?:to|at|with) (.+?)(?:\.|$)/im,
-    // "Application for ... at [Company]"
-    /application for .+? at (.+?)(?:\.|$)/im,
-    // "[Company] - Application" (subject line pattern)
-    /^(.+?) - (?:Application|Thank you|Your application)/im,
-    // "at [Company]" in body
-    /(?:position|role|job|opportunity) at (.+?)(?:\.|,|$)/im,
-    // From name often contains company name
-    // Will be handled separately
-  ],
-
-  jobTitle: [
-    // "for applying for the role of [Job Title]. We'll" (Accenture/Workday pattern)
-    /for applying for the role of (.+?)\.\s*We['']ll/im,
-    // "for applying for the role of [Job Title]" (general)
-    /for applying for (?:the )?(?:role|position) (?:of )?(.+?)(?:\.|!|$)/im,
-    // "Thank you for applying for [Job Title]" (not "the role of")
-    /thank(?:s| you) for applying for (?:the )?(?!role|position)(.+?)(?:\.|!| at)/im,
-    // "Application for [Job Title]"
-    /application for (?:the )?(?:position of )?(.+?)(?:\.|!| at| has| was)/im,
-    // "position of [Job Title]. We'll" (Accenture/Workday pattern)
-    /position of\s*(?:&nbsp;)?(.+?)(?:\.\s*We['']ll|\s*with\s)/im,
-    // "position of [Job Title]" (general)
-    /position of\s*(?:&nbsp;)?(.+?)(?:\.|\s*(?:&nbsp;)?(?:with|at)\s)/im,
-    // "the [Job Title] role/position"
-    /the (.+?) (?:role|position|opportunity)/im,
-    // "[Job Title] at [Company]"
-    /(?:applying for|applied for|application for) (?:the )?(.+?) at/im,
-    // "Role: [Job Title]"
-    /(?:role|position|job|title):?\s*(.+?)(?:\n|$)/im,
-  ],
+  company: [],
+  jobTitle: [],
 
   location: [
-    // "Location: [City]"
-    /location:?\s*(.+?)(?:\n|$)/im,
-    // "based in [City]"
-    /based in (.+?)(?:\.|,|$)/im,
-    // "[City], [State]"
     new RegExp(`(${AUSTRALIAN_CITIES.join("|")})(?:,?\\s*(?:${AUSTRALIAN_STATES.join("|")}))?`, "i"),
-    // "in [City]"
-    new RegExp(`(?:position|role|job|office|located) in (${AUSTRALIAN_CITIES.join("|")})`, "i"),
   ],
 
-  applicationUrl: [
-    // URLs containing job-related paths
-    /(https?:\/\/[^\s<>"]+(?:\/jobs?\/|\/careers?\/|\/apply|\/application|\/position)[^\s<>"]*)/i,
-    // Generic URLs in body (less specific)
-    /(https?:\/\/[^\s<>"]+)/i,
-  ],
+  applicationUrl: [],
 };
 
 /**
@@ -329,34 +235,6 @@ function cleanExtractedValue(value) {
     .trim();
 }
 
-/**
- * Try to extract company from sender name
- */
-function extractCompanyFromSender(email) {
-  const fromName = email.fromName || "";
-
-  // Common patterns: "Company Careers", "Company Recruiting", "Company Talent"
-  const senderPatterns = [
-    /^(.+?) (?:Careers|Recruiting|Talent|HR|Jobs|Hiring|Team)$/i,
-    /^(.+?) (?:via|from) /i,
-  ];
-
-  for (const pattern of senderPatterns) {
-    const match = fromName.match(pattern);
-    if (match && match[1]) {
-      return cleanExtractedValue(match[1]);
-    }
-  }
-
-  // If from name looks like a company (not a person's name)
-  // Person names usually have 2-3 words and don't contain Inc, etc.
-  if (fromName && !fromName.match(/^[A-Z][a-z]+ [A-Z][a-z]+$/)) {
-    // Likely a company name
-    return cleanExtractedValue(fromName);
-  }
-
-  return null;
-}
 
 /**
  * Main extraction function using regex patterns
@@ -402,11 +280,6 @@ function extractByRules(email) {
         break;
       }
     }
-  }
-
-  // Try extracting company from sender name
-  if (!result.company) {
-    result.company = extractCompanyFromSender(email);
   }
 
   // Try source-specific patterns for job title

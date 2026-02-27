@@ -44,7 +44,7 @@ const CLASSIFICATION_RULES = {
     },
 
     // Casual subject lines (regardless of direction)
-    { field: "subject", pattern: /^(re:|fwd:)?\s*(yo|hey man|hey dude|sup|check this out|omg|lol|haha|btw)/i, reason: "casual-language" },
+    { field: "subject", pattern: /^(re:|fwd:)?\s*(yo\b|hey man|hey dude|sup\b|check this out|omg\b|lol\b|haha|btw\b)/i, reason: "casual-language" },
 
     // Sharing content with friends
     { field: "subject", pattern: /^(re:|fwd:)?\s*(look at this|you gotta see|thought you|you'll love)/i, reason: "personal-share" },
@@ -105,7 +105,7 @@ const CLASSIFICATION_RULES = {
     { field: "from", pattern: /workforce.*australia|dewr\.gov/i, reason: "govt-reporting" },
 
     // Personal/sent emails with personal content markers
-    { field: "subject", pattern: /^(fwd:|re:)?\s*(yo|hey|sup|running late|pdf|\.pdf$)/i, reason: "personal" },
+    { field: "subject", pattern: /^(fwd:|re:)?\s*(yo\b|hey\b|sup\b|running late|pdf\b|\.pdf$)/i, reason: "personal" },
     { field: "subject", pattern: /^(fwd:|re:)?\s*\w+\s+(video|song|music|watch this)/i, reason: "personal-share" },
 
     // Veterinary/pets
@@ -118,6 +118,9 @@ const CLASSIFICATION_RULES = {
     // Event invitations (not interview)
     { field: "subject", pattern: /webinar|event.*registration|join.*session/i, condition: (e) => !/interview|screen|assessment/i.test(e.subject), reason: "event-invite" },
     { field: "subject", pattern: /go beyond human limits|days? to go:/i, reason: "event-promo" },
+
+    // SEEK notifications that are NOT application confirmations
+    { field: "from", pattern: /seek/i, condition: (e) => /save your search|matching jobs delivered/i.test(e.subject), reason: "seek-job-alert" },
   ],
 
   // -------------------------------------------------------------------------
@@ -153,6 +156,13 @@ const CLASSIFICATION_RULES = {
     // NinjaTech, Neara, etc.
     { field: "subject", pattern: /received your job application/i, reason: "received-job-app" },
 
+    // Recruiter emails via SEEK: "Your application to our role of..."
+    { field: "subject", pattern: /your application to our role/i, reason: "recruiter-application-response" },
+
+    // Company application emails: "Your application to [Company]"
+    { field: "subject", pattern: /your application to \w/i,
+      condition: (e) => !/seek|linkedin|indeed/i.test(e.from),
+      reason: "company-application" },
   ],
 
   // -------------------------------------------------------------------------
@@ -169,10 +179,12 @@ const CLASSIFICATION_RULES = {
       extract: (e) => {
         const text = e.textBody || "";
         // Try multiple patterns for SEEK email variations
+        // Use [\s\S]+? for job title to match across line breaks
+        // Company is on same line as "submitted to", so use .+ (single-line)
         const patterns = [
-          /application for\s+(.+?)\s+was\s+(?:successfully\s+)?submitted\s+to\s+(.+?)(?:\.|!|\n|$)/im,
-          /your\s+application\s+for\s+(.+?)\s+(?:has been|was)\s+(?:successfully\s+)?submitted\s+to\s+(.+?)(?:\.|!|\n|$)/im,
-          /submitted\s+(?:your\s+)?application\s+for\s+(.+?)\s+to\s+(.+?)(?:\.|!|\n|$)/im,
+          /application for\s+([\s\S]+?)\s+was\s+(?:successfully\s+)?submitted\s+to\s+(.+)/im,
+          /your\s+application\s+for\s+([\s\S]+?)\s+(?:has been|was)\s+(?:successfully\s+)?submitted\s+to\s+(.+)/im,
+          /submitted\s+(?:your\s+)?application\s+for\s+([\s\S]+?)\s+to\s+(.+)/im,
         ];
         for (const pattern of patterns) {
           const match = text.match(pattern);
@@ -275,6 +287,9 @@ const CLASSIFICATION_RULES = {
     { field: "subject", pattern: /update on.*recruitment/i, reason: "recruitment-update" },
     { field: "subject", pattern: /take.*step|final.*step/i, condition: (e) => !/interview/i.test(e.subject), reason: "take-step" },
     { field: "from", pattern: /testgorilla/i, condition: (e) => /submitted|next|result/i.test(e.subject), reason: "testgorilla-followup" },
+
+    // SEEK "new activity in jobs you applied for"
+    { field: "from", pattern: /seek/i, condition: (e) => /new activity in jobs/i.test(e.subject), reason: "seek-activity-notification" },
   ],
 };
 
@@ -293,7 +308,7 @@ function classifyByRules(email) {
   };
 
   // Check rules in priority order
-  const checkOrder = ["other", "interview", "rejection", "job_response", "follow_up"];
+  const checkOrder = ["other", "job_application", "interview", "rejection", "job_response", "follow_up"];
 
   for (const type of checkOrder) {
     const rules = CLASSIFICATION_RULES[type] || [];
