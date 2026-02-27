@@ -1,5 +1,14 @@
-// NOTE: Local equivalent at scripts/lib/prompts.js — keep both in sync
-export const EMAIL_CLASSIFICATION_SYSTEM_PROMPT = `You are an expert email classifier specialized in job search and recruitment communications. Your task is to analyze emails and determine if they are job-related, and if so, extract relevant information.
+/**
+ * Shared Classification Prompts
+ *
+ * Single source of truth for Ollama classification prompts used by
+ * local-sync, reclassify-untagged, and scan-corrections scripts.
+ *
+ * NOTE: Server equivalent at src/lib/ai/prompts/email-classification/system.ts
+ * Keep both in sync when making prompt changes.
+ */
+
+const CLASSIFICATION_SYSTEM_PROMPT = `You are an expert email classifier specialized in job search and recruitment communications. Your task is to analyze emails and determine if they are job-related, and if so, extract relevant information.
 
 ## CLASSIFICATION CATEGORIES
 
@@ -131,4 +140,51 @@ Body: "Thank you for your interest in the Software Engineer position..."
 - Only extract data that is EXPLICITLY stated in the email
 - For company name, look past the ATS - find the actual employer
 - Confidence should reflect certainty: 0.9+ for clear cases, 0.5-0.7 for ambiguous
-- Brief reasoning helps verify the classification logic`;
+- Brief reasoning helps verify the classification logic
+
+Respond ONLY with valid JSON:
+{"type":"category","confidence":0.95,"reasoning":"brief explanation","extractedData":{"company":"Name or null","jobTitle":"Title or null","location":"City or null","applicationUrl":"url or null","recruiterName":"Name or null","salaryRange":"range or null","source":"SEEK/LinkedIn/etc or null"}}`;
+
+/**
+ * Build few-shot examples from recent corrections
+ */
+function buildFewShotExamples(corrections, maxExamples = 5) {
+  if (!corrections || corrections.length === 0) return "";
+
+  const recent = corrections.slice(-maxExamples);
+
+  const examples = recent.map((c, i) => {
+    return `Example ${i + 1} (CORRECTED - was "${c.originalType}", should be "${c.correctedType}"):
+Subject: ${c.subject}
+From: ${c.from}
+Direction: ${c.isOutbound ? "SENT" : "RECEIVED"}
+Body preview: ${(c.bodyPreview || "").substring(0, 500)}
+CORRECT classification: ${c.correctedType}`;
+  }).join("\n\n");
+
+  return `\n\nHere are some examples of previous corrections to learn from:\n${examples}\n\nNow classify the following email:`;
+}
+
+/**
+ * Build the user prompt for classification
+ */
+function buildClassificationUserPrompt(email, corrections = []) {
+  const fewShotExamples = buildFewShotExamples(corrections);
+
+  return `${fewShotExamples}
+
+Direction: ${email.isOutbound ? "SENT" : "RECEIVED"}
+From: ${email.fromName || email.from}
+To: ${email.to}
+Subject: ${email.subject}
+Date: ${email.date.toISOString()}
+
+Body:
+${(email.textBody || "(No text body)").substring(0, 3000)}`;
+}
+
+module.exports = {
+  CLASSIFICATION_SYSTEM_PROMPT,
+  buildClassificationUserPrompt,
+  buildFewShotExamples,
+};

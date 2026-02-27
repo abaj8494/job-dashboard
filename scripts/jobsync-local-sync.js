@@ -16,6 +16,7 @@ const fs = require("fs");
 const path = require("path");
 const { CLASSIFICATION_TYPES, classifyByRules, htmlToText } = require("./lib/classification-rules");
 const { extractByRules, mergeExtractedData, needsLLMFallback, buildExtractionPrompt, parseLLMResponse } = require("./lib/extraction-rules");
+const { CLASSIFICATION_SYSTEM_PROMPT, buildClassificationUserPrompt } = require("./lib/prompts");
 
 const execAsync = promisify(exec);
 
@@ -94,27 +95,6 @@ function saveCorrections(data) {
   } catch (e) {
     log(`Failed to save corrections: ${e.message}`);
   }
-}
-
-/**
- * Build few-shot examples from recent corrections
- */
-function buildFewShotExamples(corrections, maxExamples = 5) {
-  if (!corrections || corrections.length === 0) return "";
-
-  // Get most recent corrections
-  const recent = corrections.slice(-maxExamples);
-
-  const examples = recent.map((c, i) => {
-    return `Example ${i + 1} (CORRECTED - was "${c.originalType}", should be "${c.correctedType}"):
-Subject: ${c.subject}
-From: ${c.from}
-Direction: ${c.isOutbound ? "SENT" : "RECEIVED"}
-Body preview: ${(c.bodyPreview || "").substring(0, 500)}
-CORRECT classification: ${c.correctedType}`;
-  }).join("\n\n");
-
-  return `\n\nHere are some examples of previous corrections to learn from:\n${examples}\n\nNow classify the following email:`;
 }
 
 /**
@@ -224,53 +204,7 @@ async function parseEmailFile(filePath) {
 }
 
 async function classifyWithOllama(email, corrections = []) {
-  const systemPrompt = `You are an email classifier for job search tracking.
-
-## CRITICAL: CHECK PERSONAL EMAILS FIRST
-
-Before classifying as job-related, ask:
-1. Is this TO a personal email (gmail, outlook, etc.) with casual content? -> "other"
-2. Is this outbound to a friend/family member? -> "other"
-3. Does it use casual language (hey, yo, sup, check this out)? -> "other"
-4. Is someone venting about jobs to a friend? -> "other" (NOT a job application!)
-
-Personal emails about jobs are NOT job applications. Only formal communications with companies/recruiters count.
-
-## CLASSIFICATION CATEGORIES
-
-- job_application: Job board confirmation (SEEK, LinkedIn, Indeed) that application was SUBMITTED
-  * Pattern: "Your application for [JOB] was submitted to [COMPANY]"
-- job_response: COMPANY acknowledging receipt (thank you for applying, application received)
-- interview: Interview invitation or scheduling
-- rejection: Application rejected / not moving forward
-- offer: Job offer received
-- follow_up: Follow-up correspondence, next steps
-- other: Not job-related (DEFAULT when uncertain)
-
-## EXTRACTION PATTERNS
-
-For SEEK: "application for [JOB_TITLE] was submitted to [COMPANY]"
-For LinkedIn: "You applied for [JOB_TITLE] at [COMPANY]"
-For company emails: Look for role/position mentioned + company in from/signature
-
-## OUTPUT FORMAT
-
-Respond ONLY with valid JSON:
-{"type":"category","confidence":0.95,"reasoning":"brief explanation","extractedData":{"company":"Name or null","jobTitle":"Title or null","location":"City or null","applicationUrl":"url or null","recruiterName":"Name or null","salaryRange":"range or null","source":"SEEK/LinkedIn/etc or null"}}`;
-
-  // Add few-shot examples from corrections if available
-  const fewShotExamples = buildFewShotExamples(corrections);
-
-  const userPrompt = `${fewShotExamples}
-
-Direction: ${email.isOutbound ? "SENT" : "RECEIVED"}
-From: ${email.fromName || email.from}
-To: ${email.to}
-Subject: ${email.subject}
-Date: ${email.date.toISOString()}
-
-Body:
-${(email.textBody || "(No text body)").substring(0, 3000)}`;
+  const userPrompt = buildClassificationUserPrompt(email, corrections);
 
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
@@ -278,11 +212,11 @@ ${(email.textBody || "(No text body)").substring(0, 3000)}`;
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: OLLAMA_MODEL,
-        prompt: `${systemPrompt}\n\n${userPrompt}`,
+        prompt: `${CLASSIFICATION_SYSTEM_PROMPT}\n\n${userPrompt}`,
         stream: false,
         format: "json",
         options: {
-          temperature: 0.1, // Low temperature for consistent classification
+          temperature: 0.1,
           num_predict: 400,
         },
       }),
@@ -409,7 +343,7 @@ async function processOneEmail(filePath, index, total, corrections = []) {
   let classificationSource = "rules";
 
   if (classification) {
-    log(`[${index + 1}/${total}] [RULE:${classification.reason}] ${shortSubject} -> ${classification.type}`);
+    log(`[${index + 1}/${total}] [FAST-PATH:${classification.reason}] ${shortSubject} -> ${classification.type}`);
   } else {
     // Fall back to Ollama for complex cases
     log(`[${index + 1}/${total}] [LLM] Classifying: ${shortSubject}...`);

@@ -17,6 +17,7 @@ const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
 const { CLASSIFICATION_TYPES, classifyByRules, htmlToText } = require("./lib/classification-rules");
+const { CLASSIFICATION_SYSTEM_PROMPT, buildClassificationUserPrompt } = require("./lib/prompts");
 
 const execAsync = promisify(exec);
 
@@ -49,20 +50,6 @@ function loadCorrections() {
     // ignore
   }
   return { corrections: [], lastScan: null };
-}
-
-function buildFewShotExamples(corrections, maxExamples = 5) {
-  if (!corrections || corrections.length === 0) return "";
-  const recent = corrections.slice(-maxExamples);
-  const examples = recent.map((c, i) => {
-    return `Example ${i + 1} (CORRECTED - was "${c.originalType}", should be "${c.correctedType}"):
-Subject: ${c.subject}
-From: ${c.from}
-Direction: ${c.isOutbound ? "SENT" : "RECEIVED"}
-Body preview: ${(c.bodyPreview || "").substring(0, 500)}
-CORRECT classification: ${c.correctedType}`;
-  }).join("\n\n");
-  return `\n\nHere are some examples of previous corrections to learn from:\n${examples}\n\nNow classify the following email:`;
 }
 
 async function queryUntaggedEmails() {
@@ -143,32 +130,7 @@ async function parseEmailFile(filePath) {
 }
 
 async function classifyWithOllama(email, corrections = []) {
-  const systemPrompt = `You are an email classifier for job search tracking. Classify emails into one of these categories:
-- job_application: Email SENT BY the user applying for a job
-- job_response: Company acknowledging receipt of application
-- interview: Interview invitation or scheduling
-- rejection: Application rejected
-- offer: Job offer received
-- follow_up: Follow-up correspondence about an application
-- other: Not job-related
-
-Also extract: company name, job title, location, application URL, recruiter name, salary range (if mentioned).
-
-Respond ONLY with valid JSON in this exact format:
-{"type":"category","confidence":0.95,"extractedData":{"company":"Name","jobTitle":"Title","location":"City","applicationUrl":"url","recruiterName":"Name","salaryRange":"range"}}`;
-
-  const fewShotExamples = buildFewShotExamples(corrections);
-
-  const userPrompt = `${fewShotExamples}
-
-Direction: ${email.isOutbound ? "SENT" : "RECEIVED"}
-From: ${email.fromName || email.from}
-To: ${email.to}
-Subject: ${email.subject}
-Date: ${email.date.toISOString()}
-
-Body:
-${(email.textBody || "(No text body)").substring(0, 3000)}`;
+  const userPrompt = buildClassificationUserPrompt(email, corrections);
 
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
@@ -176,9 +138,13 @@ ${(email.textBody || "(No text body)").substring(0, 3000)}`;
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: OLLAMA_MODEL,
-        prompt: `${systemPrompt}\n\n${userPrompt}`,
+        prompt: `${CLASSIFICATION_SYSTEM_PROMPT}\n\n${userPrompt}`,
         stream: false,
         format: "json",
+        options: {
+          temperature: 0.1,
+          num_predict: 400,
+        },
       }),
     });
 
@@ -312,7 +278,7 @@ async function main() {
       let classification = classifyByRules(parsed);
 
       if (classification) {
-        log(`[${index + 1}/${total}] [RULE:${classification.reason}] ${shortSubject} -> ${classification.type}`);
+        log(`[${index + 1}/${total}] [FAST-PATH:${classification.reason}] ${shortSubject} -> ${classification.type}`);
       } else {
         // Fall back to Ollama
         log(`[${index + 1}/${total}] [LLM] Classifying: ${shortSubject}...`);
