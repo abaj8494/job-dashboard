@@ -230,7 +230,7 @@ async function classifyWithOllama(email, corrections = []) {
     const result = JSON.parse(data.response);
 
     return {
-      type: result.type || "other",
+      type: CLASSIFICATION_TYPES.includes(result.type) ? result.type : "other",
       confidence: result.confidence || 0.5,
       extractedData: result.extractedData || {},
     };

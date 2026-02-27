@@ -24,6 +24,10 @@ const execAsync = promisify(exec);
 
 // CLI flags
 const REPROCESS = process.argv.includes("--reprocess");
+const LIMIT = (() => {
+  const idx = process.argv.indexOf("--limit");
+  return idx !== -1 && process.argv[idx + 1] ? parseInt(process.argv[idx + 1], 10) : 0;
+})();
 
 // Configuration
 const JOBSYNC_API_URL =
@@ -214,7 +218,7 @@ async function classifyWithOllama(email, corrections = []) {
     const result = JSON.parse(data.response);
 
     return {
-      type: result.type || "other",
+      type: CLASSIFICATION_TYPES.includes(result.type) ? result.type : "other",
       confidence: result.confidence || 0.5,
       extractedData: result.extractedData || {},
     };
@@ -426,9 +430,14 @@ async function main() {
   }
 
   // Find emails to process
-  const emails = REPROCESS
+  let emails = REPROCESS
     ? await queryTaggedEmails()
     : await queryUntaggedEmails();
+
+  if (LIMIT > 0 && emails.length > LIMIT) {
+    log(`Limiting to ${LIMIT} of ${emails.length} emails`);
+    emails = emails.slice(0, LIMIT);
+  }
 
   log(`Found ${emails.length} emails to ${REPROCESS ? "reprocess" : "classify"}`);
 

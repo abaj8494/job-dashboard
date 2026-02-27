@@ -142,8 +142,8 @@ Body: "Thank you for your interest in the Software Engineer position..."
 - Confidence should reflect certainty: 0.9+ for clear cases, 0.5-0.7 for ambiguous
 - Brief reasoning helps verify the classification logic
 
-Respond ONLY with valid JSON:
-{"type":"category","confidence":0.95,"reasoning":"brief explanation","extractedData":{"company":"Name or null","jobTitle":"Title or null","location":"City or null","applicationUrl":"url or null","recruiterName":"Name or null","salaryRange":"range or null","source":"SEEK/LinkedIn/etc or null"}}`;
+Respond ONLY with valid JSON. The "type" field MUST be one of: job_application, job_response, interview, rejection, offer, follow_up, other.
+{"type":"other","confidence":0.95,"reasoning":"brief explanation","extractedData":{"company":"Name or null","jobTitle":"Title or null","location":"City or null","applicationUrl":"url or null","recruiterName":"Name or null","salaryRange":"range or null","source":"SEEK/LinkedIn/etc or null"}}`;
 
 /**
  * Build few-shot examples from recent corrections
