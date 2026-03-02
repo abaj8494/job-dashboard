@@ -255,20 +255,26 @@ function deduplicateJobs(jobs) {
 // ============ Ollama Scoring ============
 
 async function scoreJob(job) {
-  const prompt = `Score how likely this candidate would get an INTERVIEW for this job (0-100).
+  const prompt = `Score how likely this FRESH GRADUATE candidate would get an INTERVIEW for this job (0-100).
 
-Key factors:
-- Seniority match (MOST IMPORTANT): Candidate is a fresh grad. Junior/entry/grad roles = high score. Mid-level = moderate. Senior/Lead/Principal/Manager = very low (0-20) regardless of skill match.
-- Skills overlap: Do the candidate's skills match what's required?
-- Location: Sydney-based roles score higher.
-- Experience gap: Jobs requiring 3+ years commercial experience should score lower.
+CRITICAL: Read the FULL job description carefully. Look for seniority signals:
+- Words like "senior", "mid-level", "experienced", "lead", "principal" ANYWHERE in the description = score 0-15.
+- Requirements like "3+ years experience", "5+ years", "commercial experience required" = score 0-15.
+- "As a Senior...", "mid to senior", "experienced engineer" = score 0-15.
+These should score very low NO MATTER how well the skills match. A fresh grad will NOT get an interview for a senior role.
+
+Scoring factors (in order of importance):
+1. Seniority match: Is this genuinely entry-level/junior/graduate? Check the DESCRIPTION not just the title.
+2. Experience requirements: Does it require years of commercial experience the candidate doesn't have?
+3. Skills overlap: Do the candidate's skills match what's required?
+4. Location: Sydney/AU-based roles score higher. Remote AU roles are acceptable.
 
 Use the FULL 0-100 scale:
-- 90-100: Perfect match (entry-level, right skills, right location)
-- 70-89: Strong match (junior role, most skills align)
-- 50-69: Decent match (some skills overlap, acceptable level)
-- 30-49: Weak match (mid-level role or few relevant skills)
-- 0-20: Poor match (senior/lead/principal/manager role, or wrong field entirely)
+- 85-100: Explicitly junior/graduate/entry-level/intern, right skills, Sydney/AU
+- 65-84: Entry-level implied (no years required), good skill match, right location
+- 40-64: Ambiguous level but skills match, or junior role with partial skill match
+- 15-39: Likely mid-level, or poor skill/location match
+- 0-14: Clearly senior/lead/experienced role, or completely wrong field/location
 
 CANDIDATE: ${CANDIDATE_PROFILE}
 
@@ -374,11 +380,24 @@ async function main() {
   const uniqueJobs = deduplicateJobs(allJobs);
   log(`After dedup: ${uniqueJobs.length}`);
 
-  // Step 2b: Filter out seniority-mismatched titles
-  const TITLE_BLOCKLIST = /\b(senior|sr\.?|lead|principal|staff|director|head of|vp|manager)\b/i;
+  // Step 2b: Filter out seniority-mismatched titles and descriptions
+  const SENIORITY_RE = /\b(senior|sr\.?|lead|principal|staff|director|head of|vp|manager|architect)\b/i;
+  const DESC_SENIORITY_RE = /\b(as a|seeking a?|looking for a?|we need a?)\s+(senior|mid[- ]?to[- ]?senior|experienced|mid[- ]?level|lead|principal|staff)\b/i;
+  const EXP_YEARS_RE = /\b(\d+)\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:experience|exp)\b/i;
   const filtered = uniqueJobs.filter((job) => {
-    if (TITLE_BLOCKLIST.test(job.title)) {
-      log(`  Filtered: ${job.title} (seniority mismatch)`);
+    if (SENIORITY_RE.test(job.title)) {
+      log(`  Filtered: ${job.title} (seniority in title)`);
+      return false;
+    }
+    const desc = job.description || "";
+    if (DESC_SENIORITY_RE.test(desc)) {
+      const match = desc.match(DESC_SENIORITY_RE);
+      log(`  Filtered: ${job.title} (description says "${match[0]}")`);
+      return false;
+    }
+    const yearsMatch = desc.match(EXP_YEARS_RE);
+    if (yearsMatch && parseInt(yearsMatch[1], 10) >= 3) {
+      log(`  Filtered: ${job.title} (requires ${yearsMatch[1]}+ years experience)`);
       return false;
     }
     return true;
