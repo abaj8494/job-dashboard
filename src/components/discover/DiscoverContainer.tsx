@@ -48,7 +48,7 @@ export default function DiscoverContainer() {
   const [recordsPerPage, setRecordsPerPage] = useState<number>(
     APP_CONSTANTS.RECORDS_PER_PAGE
   );
-  const [sortBy, setSortBy] = useState<DiscoverSortField>("createdAt");
+  const [sortBy, setSortBy] = useState<DiscoverSortField>("matchScore");
   const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
 
   // Search form state

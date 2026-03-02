@@ -9,7 +9,7 @@ import { searchJooble } from "@/lib/discover/jooble";
 import { deduplicateJobs } from "@/lib/discover/deduplicator";
 import { DiscoverSearchParams } from "@/lib/discover/types";
 
-export type DiscoverSortField = "title" | "company" | "location" | "postedDate" | "source" | "createdAt";
+export type DiscoverSortField = "title" | "company" | "location" | "postedDate" | "source" | "createdAt" | "matchScore";
 export type SortOrder = "asc" | "desc";
 
 export async function searchAndStoreJobs(params: DiscoverSearchParams) {
@@ -105,6 +105,7 @@ export async function getDiscoveredJobs(
       postedDate: { postedDate: sortOrder },
       source: { source: sortOrder },
       createdAt: { createdAt: sortOrder },
+      matchScore: { matchScore: sortOrder },
     };
 
     const [data, total] = await Promise.all([

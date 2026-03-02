@@ -34,6 +34,7 @@ type DiscoveredJob = {
   description: string | null;
   postedDate: Date | string | null;
   status: string;
+  matchScore: number | null;
   createdAt: Date | string;
 };
 
@@ -156,6 +157,15 @@ export default function DiscoverTable({
             />
           </TableHead>
           <TableHead>
+            <SortableHeader
+              field="matchScore"
+              label="Match"
+              currentSort={sortBy}
+              sortOrder={sortOrder}
+              onSort={onSort}
+            />
+          </TableHead>
+          <TableHead>
             <span className="sr-only">Actions</span>
           </TableHead>
         </TableRow>
@@ -193,6 +203,26 @@ export default function DiscoverTable({
               <Badge className={cn("text-xs", sourceBadgeColor(job.source))}>
                 {job.source}
               </Badge>
+            </TableCell>
+            <TableCell>
+              {job.matchScore != null ? (
+                <Badge
+                  className={cn(
+                    "text-xs",
+                    job.matchScore >= 80
+                      ? "bg-green-500"
+                      : job.matchScore >= 60
+                        ? "bg-yellow-500"
+                        : job.matchScore >= 40
+                          ? "bg-orange-500"
+                          : "bg-red-500"
+                  )}
+                >
+                  {Math.round(job.matchScore)}
+                </Badge>
+              ) : (
+                <span className="text-muted-foreground text-xs">—</span>
+              )}
             </TableCell>
             <TableCell>
               <div className="flex items-center gap-1">
