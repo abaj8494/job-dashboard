@@ -56,9 +56,14 @@ const TOP_N = topIdx !== -1 ? parseInt(args[topIdx + 1], 10) : DISCOVER_TOP_N;
 const SEARCH_QUERIES = [
   "machine learning engineer",
   "software engineer",
+  "junior software engineer",
+  "graduate software engineer",
+  "entry level developer",
   "data analyst",
+  "junior data analyst",
 ];
 const SEARCH_LOCATION = "Sydney";
+const LOCATION_ALLOWLIST = /\b(sydney|nsw|new south wales|australia|remote)\b/i;
 
 const CANDIDATE_PROFILE = `Aayush Bajaj — Sydney-based ML/Software Engineer graduating Sep 2025 from UNSW (CS/AI + Math minor). Starting Masters in Statistics Feb 2026.
 
@@ -380,11 +385,19 @@ async function main() {
   const uniqueJobs = deduplicateJobs(allJobs);
   log(`After dedup: ${uniqueJobs.length}`);
 
+  // Step 2a: Filter out non-AU locations
+  const locationFiltered = uniqueJobs.filter((job) => {
+    if (LOCATION_ALLOWLIST.test(job.location)) return true;
+    log(`  Filtered: ${job.title} (location: ${job.location})`);
+    return false;
+  });
+  log(`After location filter: ${locationFiltered.length} (removed ${uniqueJobs.length - locationFiltered.length})`);
+
   // Step 2b: Filter out seniority-mismatched titles and descriptions
   const SENIORITY_RE = /\b(senior|sr\.?|lead|principal|staff|director|head of|vp|manager|architect)\b/i;
   const DESC_SENIORITY_RE = /\b(as a|seeking a?|looking for a?|we need a?)\s+(senior|mid[- ]?to[- ]?senior|experienced|mid[- ]?level|lead|principal|staff)\b/i;
   const EXP_YEARS_RE = /\b(\d+)\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:experience|exp)\b/i;
-  const filtered = uniqueJobs.filter((job) => {
+  const filtered = locationFiltered.filter((job) => {
     if (SENIORITY_RE.test(job.title)) {
       log(`  Filtered: ${job.title} (seniority in title)`);
       return false;
@@ -402,7 +415,7 @@ async function main() {
     }
     return true;
   });
-  log(`After seniority filter: ${filtered.length} (removed ${uniqueJobs.length - filtered.length})`);
+  log(`After seniority filter: ${filtered.length} (removed ${locationFiltered.length - filtered.length})`);
 
   if (filtered.length === 0) {
     log("No jobs found. Exiting.");
