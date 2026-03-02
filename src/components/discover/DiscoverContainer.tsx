@@ -68,7 +68,7 @@ export default function DiscoverContainer() {
       order?: SortOrder
     ) => {
       setLoading(true);
-      const result = await getDiscoveredJobs(
+      const result: any = await getDiscoveredJobs(
         p,
         recordsPerPage,
         filter,
@@ -77,14 +77,14 @@ export default function DiscoverContainer() {
         order || sortOrder
       );
       if (result?.success && result.data) {
-        setJobs((prev) => (p === 1 ? result.data! : [...prev, ...result.data!]));
-        setTotalJobs(result.total!);
+        setJobs((prev) => (p === 1 ? result.data : [...prev, ...result.data]));
+        setTotalJobs(result.total);
         setPage(p);
       } else {
         toast({
           variant: "destructive",
           title: "Error!",
-          description: (result as any)?.message || "Failed to load jobs",
+          description: result?.message || "Failed to load jobs",
         });
       }
       setLoading(false);
@@ -95,7 +95,7 @@ export default function DiscoverContainer() {
   const handleSearch = async () => {
     if (!keywords.trim()) return;
     setSearching(true);
-    const result = await searchAndStoreJobs({
+    const result: any = await searchAndStoreJobs({
       keywords,
       location,
       maxDaysOld,
@@ -104,14 +104,14 @@ export default function DiscoverContainer() {
     if (result?.success) {
       toast({
         variant: "success",
-        description: `Found and stored ${(result as any).count} jobs`,
+        description: `Found and stored ${result.count} jobs`,
       });
       await loadJobs(1, statusFilter, searchTerm || undefined);
     } else {
       toast({
         variant: "destructive",
         title: "Error!",
-        description: (result as any)?.message || "Search failed",
+        description: result?.message || "Search failed",
       });
     }
     setSearching(false);
@@ -126,7 +126,7 @@ export default function DiscoverContainer() {
   };
 
   const handleSave = async (id: string) => {
-    const result = await saveToMyJobs(id);
+    const result: any = await saveToMyJobs(id);
     if (result?.success) {
       toast({
         variant: "success",
@@ -137,13 +137,13 @@ export default function DiscoverContainer() {
       toast({
         variant: "destructive",
         title: "Error!",
-        description: (result as any)?.message || "Failed to save job",
+        description: result?.message || "Failed to save job",
       });
     }
   };
 
   const handleHide = async (id: string) => {
-    const result = await updateDiscoveredJobStatus(id, "hidden");
+    const result: any = await updateDiscoveredJobStatus(id, "hidden");
     if (result?.success) {
       setJobs((prev) => prev.filter((j) => j.id !== id));
       setTotalJobs((prev) => prev - 1);
@@ -151,7 +151,7 @@ export default function DiscoverContainer() {
       toast({
         variant: "destructive",
         title: "Error!",
-        description: (result as any)?.message || "Failed to hide job",
+        description: result?.message || "Failed to hide job",
       });
     }
   };
