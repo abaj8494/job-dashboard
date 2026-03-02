@@ -51,7 +51,7 @@ export async function searchJooble(
   const data: JoobleResponse = await response.json();
 
   return (data.jobs || []).map((job) => ({
-    externalId: job.id || `jooble-${Buffer.from(job.link || job.title).toString("base64").slice(0, 32)}`,
+    externalId: String(job.id || `jooble-${Buffer.from(job.link || job.title).toString("base64").slice(0, 32)}`),
     source: "jooble" as const,
     title: job.title,
     company: job.company || "Unknown",
