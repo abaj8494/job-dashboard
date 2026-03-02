@@ -7,6 +7,7 @@ import {
   Sheet,
   Wrench,
   Mail,
+  Compass,
 } from "lucide-react";
 
 export const APP_CONSTANTS = {
@@ -26,6 +27,11 @@ export const SIDEBAR_LINKS = [
     icon: BriefcaseBusiness,
     route: "/dashboard/myjobs",
     label: "My Jobs",
+  },
+  {
+    icon: Compass,
+    route: "/dashboard/discover",
+    label: "Discover",
   },
   {
     icon: Mail,
