@@ -662,7 +662,7 @@ function EmailImportReview({
           </TabsContent>
 
           <TabsContent value="link" className="mt-4">
-            <ScrollArea className="h-[400px] pr-4">
+            <ScrollArea className={selectedJobId ? "h-[310px] pr-4" : "h-[400px] pr-4"}>
               <div className="space-y-4">
                 {/* Email Summary */}
                 <div className="bg-muted p-4 rounded-lg">
@@ -745,28 +745,28 @@ function EmailImportReview({
                     </div>
                   </div>
                 )}
-
-                {/* Status Selection */}
-                {selectedJobId && (
-                  <div className="space-y-2 pt-2">
-                    <Separator />
-                    <Label>Update job status to</Label>
-                    <Select value={linkStatusId} onValueChange={setLinkStatusId}>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select new status" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {statuses.map((s) => (
-                          <SelectItem key={s.id} value={s.id}>
-                            {s.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
               </div>
             </ScrollArea>
+
+            {/* Status Selection — outside ScrollArea so it's always visible */}
+            {selectedJobId && (
+              <div className="space-y-2 pt-2">
+                <Separator />
+                <Label>Update job status to</Label>
+                <Select value={linkStatusId} onValueChange={setLinkStatusId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select new status" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {statuses.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </TabsContent>
 
           <TabsContent value="email" className="mt-4">
