@@ -76,15 +76,15 @@ export default function DiscoverContainer() {
         sort || sortBy,
         order || sortOrder
       );
-      if (result.success && result.data) {
-        setJobs((prev) => (p === 1 ? result.data : [...prev, ...result.data]));
+      if (result?.success && result.data) {
+        setJobs((prev) => (p === 1 ? result.data! : [...prev, ...result.data!]));
         setTotalJobs(result.total!);
         setPage(p);
       } else {
         toast({
           variant: "destructive",
           title: "Error!",
-          description: (result as any).message || "Failed to load jobs",
+          description: (result as any)?.message || "Failed to load jobs",
         });
       }
       setLoading(false);
@@ -101,7 +101,7 @@ export default function DiscoverContainer() {
       maxDaysOld,
       source,
     });
-    if (result.success) {
+    if (result?.success) {
       toast({
         variant: "success",
         description: `Found and stored ${(result as any).count} jobs`,
@@ -111,7 +111,7 @@ export default function DiscoverContainer() {
       toast({
         variant: "destructive",
         title: "Error!",
-        description: (result as any).message || "Search failed",
+        description: (result as any)?.message || "Search failed",
       });
     }
     setSearching(false);
@@ -127,7 +127,7 @@ export default function DiscoverContainer() {
 
   const handleSave = async (id: string) => {
     const result = await saveToMyJobs(id);
-    if (result.success) {
+    if (result?.success) {
       toast({
         variant: "success",
         description: "Job saved to My Jobs",
@@ -137,21 +137,21 @@ export default function DiscoverContainer() {
       toast({
         variant: "destructive",
         title: "Error!",
-        description: (result as any).message || "Failed to save job",
+        description: (result as any)?.message || "Failed to save job",
       });
     }
   };
 
   const handleHide = async (id: string) => {
     const result = await updateDiscoveredJobStatus(id, "hidden");
-    if (result.success) {
+    if (result?.success) {
       setJobs((prev) => prev.filter((j) => j.id !== id));
       setTotalJobs((prev) => prev - 1);
     } else {
       toast({
         variant: "destructive",
         title: "Error!",
-        description: (result as any).message || "Failed to hide job",
+        description: (result as any)?.message || "Failed to hide job",
       });
     }
   };
