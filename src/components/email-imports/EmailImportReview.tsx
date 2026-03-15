@@ -128,9 +128,18 @@ function EmailImportReview({
 
   // Parse extracted data - memoize to prevent useEffect from running on every render
   const extractedData: ExtractedData = useMemo(() => {
-    return emailImport?.extractedData
+    const raw = emailImport?.extractedData
       ? JSON.parse(emailImport.extractedData)
       : {};
+    // Coerce fields to string since JSON data may contain non-string types
+    return {
+      company: typeof raw.company === "string" ? raw.company : undefined,
+      jobTitle: typeof raw.jobTitle === "string" ? raw.jobTitle : undefined,
+      location: typeof raw.location === "string" ? raw.location : undefined,
+      applicationUrl: typeof raw.applicationUrl === "string" ? raw.applicationUrl : undefined,
+      recruiterName: typeof raw.recruiterName === "string" ? raw.recruiterName : undefined,
+      salaryRange: typeof raw.salaryRange === "string" ? raw.salaryRange : undefined,
+    };
   }, [emailImport?.extractedData]);
 
   // Initialize form with extracted data
