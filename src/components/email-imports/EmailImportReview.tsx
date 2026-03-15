@@ -480,7 +480,7 @@ function EmailImportReview({
                       </SelectTrigger>
                       <SelectContent>
                         {companies.map((c) => (
-                          <SelectItem key={c.id} value={c.id}>
+                          <SelectItem key={c.id} value={c.id} textValue={c.label || ""}>
                             {c.label}
                           </SelectItem>
                         ))}
@@ -517,7 +517,7 @@ function EmailImportReview({
                     </SelectTrigger>
                     <SelectContent>
                       {titles.map((t) => (
-                        <SelectItem key={t.id} value={t.id}>
+                        <SelectItem key={t.id} value={t.id} textValue={t.label || ""}>
                           {t.label}
                         </SelectItem>
                       ))}
@@ -553,7 +553,7 @@ function EmailImportReview({
                     </SelectTrigger>
                     <SelectContent>
                       {locations.map((l) => (
-                        <SelectItem key={l.id} value={l.id}>
+                        <SelectItem key={l.id} value={l.id} textValue={l.label || ""}>
                           {l.label}
                         </SelectItem>
                       ))}
@@ -587,7 +587,7 @@ function EmailImportReview({
                       </SelectTrigger>
                       <SelectContent>
                         {statuses.map((s) => (
-                          <SelectItem key={s.id} value={s.id}>
+                          <SelectItem key={s.id} value={s.id} textValue={s.label || ""}>
                             {s.label}
                           </SelectItem>
                         ))}
@@ -602,7 +602,7 @@ function EmailImportReview({
                       </SelectTrigger>
                       <SelectContent>
                         {sources.map((s) => (
-                          <SelectItem key={s.id} value={s.id}>
+                          <SelectItem key={s.id} value={s.id} textValue={s.label || ""}>
                             {s.label}
                           </SelectItem>
                         ))}
@@ -759,7 +759,7 @@ function EmailImportReview({
                   </SelectTrigger>
                   <SelectContent>
                     {statuses.map((s) => (
-                      <SelectItem key={s.id} value={s.id}>
+                      <SelectItem key={s.id} value={s.id} textValue={s.label || ""}>
                         {s.label}
                       </SelectItem>
                     ))}
