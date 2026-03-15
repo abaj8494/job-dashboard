@@ -145,7 +145,7 @@ export function Combobox({ options, field, creatable }: ComboboxProps) {
               <CommandList className="capitalize">
                 {options.map((option) => (
                   <CommandItem
-                    value={option.value}
+                    value={option.value ?? option.label ?? ""}
                     key={option.id}
                     onSelect={() => {
                       if (field.onChange) {

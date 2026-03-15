@@ -138,21 +138,21 @@ function EmailImportReview({
     if (emailImport && open) {
       // Try to find matching company
       const matchedCompany = companies.find(
-        (c) => c.label.toLowerCase() === extractedData.company?.toLowerCase()
+        (c) => c.label?.toLowerCase() === extractedData.company?.toLowerCase()
       );
       setCompanyId(matchedCompany?.id || "");
       setNewCompanyName(matchedCompany ? "" : extractedData.company || "");
 
       // Try to find matching title
       const matchedTitle = titles.find(
-        (t) => t.label.toLowerCase() === extractedData.jobTitle?.toLowerCase()
+        (t) => t.label?.toLowerCase() === extractedData.jobTitle?.toLowerCase()
       );
       setTitleId(matchedTitle?.id || "");
       setNewTitleName(matchedTitle ? "" : extractedData.jobTitle || "");
 
       // Try to find matching location
       const matchedLocation = locations.find(
-        (l) => l.label.toLowerCase() === extractedData.location?.toLowerCase()
+        (l) => l.label?.toLowerCase() === extractedData.location?.toLowerCase()
       );
       setLocationId(matchedLocation?.id || "");
       setNewLocationName(matchedLocation ? "" : extractedData.location || "");
@@ -713,8 +713,8 @@ function EmailImportReview({
                       {(jobSearchQuery.length >= 2 ? jobSearchResults : activeJobs
                         .filter(job =>
                           !jobSearchQuery ||
-                          job.JobTitle?.label.toLowerCase().includes(jobSearchQuery.toLowerCase()) ||
-                          job.Company?.label.toLowerCase().includes(jobSearchQuery.toLowerCase())
+                          job.JobTitle?.label?.toLowerCase().includes(jobSearchQuery.toLowerCase()) ||
+                          job.Company?.label?.toLowerCase().includes(jobSearchQuery.toLowerCase())
                         )
                       ).map((job) => (
                         <div
