@@ -317,6 +317,7 @@ function EmailImportsContainer({
         locations={locations}
         sources={sources}
         statuses={statuses}
+        onUndoComplete={handleRefresh}
       />
     </>
   );

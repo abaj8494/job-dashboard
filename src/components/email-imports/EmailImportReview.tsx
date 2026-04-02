@@ -34,11 +34,14 @@ import {
   searchJobsForLinking,
   linkToExistingJob,
   getActiveJobsForLinking,
+  undoEmailImportAction,
+  undoLinkToExistingJob,
 } from "@/actions/email-import.actions";
 import { addCompany } from "@/actions/company.actions";
 import { createJobTitle } from "@/actions/jobtitle.actions";
 import { createLocation } from "@/actions/job.actions";
 import { toast } from "../ui/use-toast";
+import { ToastAction } from "../ui/toast";
 import {
   Company,
   JobLocation,
@@ -53,6 +56,7 @@ interface EmailImportReviewProps {
   emailImport: EmailImportListItem | null;
   onComplete: () => void;
   onNext?: () => void;
+  onUndoComplete: () => void;
   queuePosition?: number;
   queueTotal?: number;
   companies: Company[];
@@ -77,6 +81,7 @@ function EmailImportReview({
   emailImport,
   onComplete,
   onNext,
+  onUndoComplete,
   queuePosition,
   queueTotal,
   companies,
@@ -327,7 +332,23 @@ function EmailImportReview({
     });
 
     if (result?.success) {
-      toast({ title: "Job created from email import" });
+      const importId = emailImport.id;
+      const createdJobId = (result as { job?: { id: string } }).job?.id;
+      toast({
+        title: "Job created from email import",
+        duration: 5000,
+        action: (
+          <ToastAction altText="Undo" onClick={async () => {
+            const res = await undoEmailImportAction(importId, "approved", createdJobId);
+            if (res?.success) {
+              toast({ title: "Job creation undone" });
+              onUndoComplete();
+            } else {
+              toast({ title: "Failed to undo", variant: "destructive" });
+            }
+          }}>Undo</ToastAction>
+        ),
+      });
       if (onNext) {
         onNext();
       } else {
@@ -342,9 +363,24 @@ function EmailImportReview({
   const handleReject = async () => {
     if (!emailImport) return;
     setLoading(true);
-    const result = await rejectEmailImport(emailImport.id);
+    const importId = emailImport.id;
+    const result = await rejectEmailImport(importId);
     if (result?.success) {
-      toast({ title: "Email import rejected" });
+      toast({
+        title: "Email import rejected",
+        duration: 5000,
+        action: (
+          <ToastAction altText="Undo" onClick={async () => {
+            const res = await undoEmailImportAction(importId, "rejected");
+            if (res?.success) {
+              toast({ title: "Rejection undone" });
+              onUndoComplete();
+            } else {
+              toast({ title: "Failed to undo", variant: "destructive" });
+            }
+          }}>Undo</ToastAction>
+        ),
+      });
       if (onNext) {
         onNext();
       } else {
@@ -359,9 +395,24 @@ function EmailImportReview({
   const handleSkip = async () => {
     if (!emailImport) return;
     setLoading(true);
-    const result = await skipEmailImport(emailImport.id);
+    const importId = emailImport.id;
+    const result = await skipEmailImport(importId);
     if (result?.success) {
-      toast({ title: "Email import skipped" });
+      toast({
+        title: "Email import skipped",
+        duration: 5000,
+        action: (
+          <ToastAction altText="Undo" onClick={async () => {
+            const res = await undoEmailImportAction(importId, "skipped");
+            if (res?.success) {
+              toast({ title: "Skip undone" });
+              onUndoComplete();
+            } else {
+              toast({ title: "Failed to undo", variant: "destructive" });
+            }
+          }}>Undo</ToastAction>
+        ),
+      });
       if (onNext) {
         onNext();
       } else {
@@ -390,9 +441,28 @@ function EmailImportReview({
   const handleLinkToJob = async () => {
     if (!emailImport || !selectedJobId || !linkStatusId) return;
     setLoading(true);
-    const result = await linkToExistingJob(emailImport.id, selectedJobId, linkStatusId);
+    const importId = emailImport.id;
+    const jobId = selectedJobId;
+    // Capture the job's current status before we change it
+    const linkedJob = [...activeJobs, ...jobSearchResults].find(j => j.id === jobId);
+    const previousStatusId = linkedJob?.Status?.id;
+    const result = await linkToExistingJob(importId, jobId, linkStatusId);
     if (result?.success) {
-      toast({ title: "Job status updated and email linked" });
+      toast({
+        title: "Job status updated and email linked",
+        duration: 5000,
+        action: previousStatusId ? (
+          <ToastAction altText="Undo" onClick={async () => {
+            const res = await undoLinkToExistingJob(importId, jobId, previousStatusId);
+            if (res?.success) {
+              toast({ title: "Link undone" });
+              onUndoComplete();
+            } else {
+              toast({ title: "Failed to undo", variant: "destructive" });
+            }
+          }}>Undo</ToastAction>
+        ) : undefined,
+      });
       if (onNext) {
         onNext();
       } else {

@@ -268,6 +268,88 @@ export const skipEmailImport = async (importId: string) => {
 };
 
 /**
+ * Undo a skip, reject, or approve action on an email import.
+ * For approve, also deletes the created job.
+ */
+export const undoEmailImportAction = async (
+  importId: string,
+  previousAction: "skipped" | "rejected" | "approved",
+  createdJobId?: string
+) => {
+  try {
+    const user = await getCurrentUser();
+    if (!user) {
+      throw new Error("Not authenticated");
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // If the action was approve, delete the created job
+      if (previousAction === "approved" && createdJobId) {
+        await tx.job.delete({
+          where: { id: createdJobId, userId: user.id },
+        });
+      }
+
+      await tx.emailImport.update({
+        where: { id: importId, userId: user.id },
+        data: {
+          status: "pending",
+          jobId: null,
+          reviewedAt: null,
+        },
+      });
+    });
+
+    revalidatePath("/dashboard/email-imports");
+    revalidatePath("/dashboard/myjobs");
+
+    return { success: true };
+  } catch (error) {
+    return handleError(error, "Failed to undo action");
+  }
+};
+
+/**
+ * Undo a link-to-existing-job action.
+ * Restores the email import to pending and reverts the job status.
+ */
+export const undoLinkToExistingJob = async (
+  importId: string,
+  jobId: string,
+  previousStatusId: string
+) => {
+  try {
+    const user = await getCurrentUser();
+    if (!user) {
+      throw new Error("Not authenticated");
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.job.update({
+        where: { id: jobId, userId: user.id },
+        data: { statusId: previousStatusId },
+      });
+
+      await tx.emailImport.update({
+        where: { id: importId, userId: user.id },
+        data: {
+          status: "pending",
+          jobId: null,
+          reviewedAt: null,
+        },
+      });
+    });
+
+    revalidatePath("/dashboard/email-imports");
+    revalidatePath("/dashboard/myjobs");
+
+    return { success: true };
+  } catch (error) {
+    return handleError(error, "Failed to undo link");
+  }
+};
+
+/**
  * Bulk reject email imports
  */
 export const bulkRejectEmailImports = async (importIds: string[]) => {
