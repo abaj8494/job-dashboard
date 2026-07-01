@@ -323,6 +323,21 @@ async function sendToServer(imports) {
 
     const result = await response.json();
     log(`Server response: ${JSON.stringify(result)}`);
+
+    // Guard against a silently-dropped POST: an http:// URL that 301-redirects
+    // to https:// gets downgraded to GET by fetch, so the body never arrives and
+    // the server replies with GET stats ({pending,total}) instead of an import
+    // result. Treat anything without a numeric `processed` count as a failure so
+    // we don't report success while losing every import.
+    if (typeof result.processed !== "number") {
+      log(
+        `ERROR: server did not confirm the import (no 'processed' count). ` +
+          `This usually means JOBSYNC_API_URL redirected the POST — ensure it uses https://. ` +
+          `URL=${JOBSYNC_API_URL}`
+      );
+      return false;
+    }
+
     return true;
   } catch (error) {
     log(`Failed to send to server: ${error.message}`);
@@ -372,7 +387,9 @@ async function processOneEmail(filePath, index, total, corrections = []) {
     ruleExtracted
   );
 
-  await markEmailProcessed(parsed.messageId, classification.type);
+  // NOTE: do NOT tag as processed here. Job-related emails are tagged in main()
+  // only after the server confirms the import, so a failed send leaves them in
+  // the queue to retry instead of orphaning them (tagged locally, absent on prod).
   return {
     status: "job_related",
     source: classificationSource,
@@ -459,9 +476,13 @@ async function main() {
     log(`Sending ${toSend.length} emails to server...`);
     const success = await sendToServer(toSend);
     if (success) {
+      // Tag as processed only now that the server has confirmed the import.
+      for (const imp of toSend) {
+        await markEmailProcessed(imp.messageId, imp.classification);
+      }
       log("Sync completed successfully");
     } else {
-      log("Sync failed - check server logs");
+      log("Sync failed - emails left untagged for retry - check server logs");
     }
   } else {
     log("No job-related emails to send");
