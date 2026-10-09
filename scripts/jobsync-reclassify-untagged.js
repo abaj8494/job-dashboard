@@ -13,10 +13,15 @@
  *   node scripts/jobsync-reclassify-untagged.js                  # untagged only
  *   node scripts/jobsync-reclassify-untagged.js --reprocess      # re-process all tagged emails
  *   node scripts/jobsync-reclassify-untagged.js --reprocess --only other   # only one old tag
- *   Flags: --limit N, --dry-run, --force (ignore progress file), --concurrency N
+ *   Flags: --limit N, --dry-run, --force (ignore progress file), --concurrency N, --batch N
  *
- * Failure semantics: a failed classification leaves the mail's tags untouched
- * and is not recorded as done, so the next run retries it.
+ * Order of operations per batch (default 20 mails): classify -> sync the
+ * server (POST/PATCH/DELETE, each confirmed) -> only then move notmuch tags
+ * and record progress for the confirmed mails. A failed classification or an
+ * unconfirmed server call leaves that mail's tags untouched and unrecorded, so
+ * the next run retries it; a batch whose server sync fails entirely stops the
+ * run. Progress is saved after every batch, so an interrupted run loses at
+ * most one batch of classification spend.
  */
 
 const { exec } = require("child_process");
@@ -39,6 +44,7 @@ function flagValue(name) {
 }
 const LIMIT = parseInt(flagValue("--limit") || "0", 10);
 const ONLY = flagValue("--only");
+const BATCH = Math.max(1, parseInt(flagValue("--batch") || process.env.JOBSYNC_RECLASSIFY_BATCH || "20", 10));
 
 // Configuration
 const JOBSYNC_API_URL =
@@ -242,11 +248,19 @@ async function setClassificationTag(messageId, newType, oldType) {
   }
 }
 
+/**
+ * POST new imports. Returns true only when the server confirmed with a numeric
+ * `processed` count (guards the http->https redirect-to-GET silent drop).
+ */
 async function sendToServer(imports) {
-  if (!JOBSYNC_API_KEY || imports.length === 0) return;
+  if (imports.length === 0) return true;
+  if (!JOBSYNC_API_KEY) {
+    log("JOBSYNC_API_KEY not set; cannot POST imports");
+    return false;
+  }
   if (DRY_RUN) {
     log(`[dry-run] would POST ${imports.length} imports`);
-    return;
+    return true;
   }
 
   try {
@@ -262,25 +276,34 @@ async function sendToServer(imports) {
     if (!response.ok) {
       const text = await response.text();
       log(`Server POST returned ${response.status}: ${text}`);
-      return;
+      return false;
     }
 
     const result = await response.json();
-    log(`Server POST: ${result.processed} processed, ${result.skipped} skipped`);
+    if (typeof result.processed !== "number") {
+      log(`ERROR: server did not confirm the import (no 'processed' count); ensure JOBSYNC_API_URL uses https://. URL=${JOBSYNC_API_URL}`);
+      return false;
+    }
+    log(`Server POST: ${result.processed} processed, ${result.skipped} skipped, ${result.filed ?? 0} filed, ${result.pending ?? 0} pending`);
+    return true;
   } catch (error) {
     log(`Failed to send to server: ${error.message}`);
+    return false;
   }
 }
 
 /**
- * Send corrections + extractedData updates via PATCH
+ * PATCH corrections + extractedData updates. Returns true on server confirmation.
  */
 async function patchServer(corrections, updates) {
-  if (!JOBSYNC_API_KEY) return;
-  if (corrections.length === 0 && updates.length === 0) return;
+  if (corrections.length === 0 && updates.length === 0) return true;
+  if (!JOBSYNC_API_KEY) {
+    log("JOBSYNC_API_KEY not set; cannot PATCH");
+    return false;
+  }
   if (DRY_RUN) {
     log(`[dry-run] would PATCH ${corrections.length} corrections, ${updates.length} updates`);
-    return;
+    return true;
   }
 
   try {
@@ -300,28 +323,43 @@ async function patchServer(corrections, updates) {
     if (!response.ok) {
       const text = await response.text();
       log(`Server PATCH returned ${response.status}: ${text}`);
-      return;
+      return false;
     }
 
     const result = await response.json();
+    if (typeof result.updated !== "number") {
+      log(`ERROR: server did not confirm the PATCH (no 'updated' count); ensure JOBSYNC_API_URL uses https://`);
+      return false;
+    }
     log(`Server PATCH: ${result.updated} updated, ${result.notFound} not found`);
+    return true;
   } catch (error) {
     log(`Failed to patch server: ${error.message}`);
+    return false;
   }
 }
 
 /**
- * Delete emails from the server
+ * DELETE demoted imports one by one. Returns the set of messageIds whose
+ * delete was NOT confirmed (network/5xx); "not found" and "kept (approved)"
+ * count as confirmed since the server state is known.
  */
 async function deleteFromServer(messageIds) {
-  if (!JOBSYNC_API_KEY || messageIds.length === 0) return;
+  const failed = new Set();
+  if (messageIds.length === 0) return failed;
+  if (!JOBSYNC_API_KEY) {
+    log("JOBSYNC_API_KEY not set; cannot DELETE");
+    messageIds.forEach((id) => failed.add(id));
+    return failed;
+  }
   if (DRY_RUN) {
     log(`[dry-run] would DELETE ${messageIds.length} imports`);
-    return;
+    return failed;
   }
 
   let deleted = 0;
   let notFound = 0;
+  let kept = 0;
 
   for (const messageId of messageIds) {
     try {
@@ -333,19 +371,27 @@ async function deleteFromServer(messageIds) {
         headers: { "x-api-key": JOBSYNC_API_KEY },
       });
 
-      if (response.ok) {
-        const result = await response.json();
-        if (result.deleted > 0) deleted++;
-        else notFound++;
+      if (!response.ok) {
+        failed.add(messageId);
+        continue;
+      }
+      const result = await response.json();
+      if (typeof result.deleted !== "number") {
+        failed.add(messageId);
+      } else if (result.deleted > 0) {
+        deleted++;
+      } else if (result.kept) {
+        kept++;
       } else {
         notFound++;
       }
     } catch (error) {
-      notFound++;
+      failed.add(messageId);
     }
   }
 
-  log(`Server DELETE: ${deleted} deleted, ${notFound} not found`);
+  log(`Server DELETE: ${deleted} deleted, ${notFound} not found, ${kept} kept (already filed to a job), ${failed.size} failed`);
+  return failed;
 }
 
 async function runWithConcurrency(items, fn, concurrency) {
@@ -395,11 +441,115 @@ function buildImportPayload(parsed, classification) {
   };
 }
 
+/**
+ * Classify one message. Pure: no tags moved, no server calls. Returns the
+ * decision plus the server action it needs, or a failure status.
+ */
+async function classifyOne({ messageId, filePath, oldType }, index, total, classifier) {
+  const parsed = await parseEmailFile(filePath);
+  if (!parsed) {
+    return { status: "parse_failed", messageId };
+  }
+
+  const shortSubject = parsed.subject.substring(0, 40).replace(/\n/g, " ");
+  const tag = `[${index + 1}/${total}]`;
+
+  let classification = classifyByRules(parsed);
+
+  if (classification) {
+    classification = { ...classification, source: "rules", stage: 0, reviewRequired: false };
+    log(`${tag} [FAST-PATH:${classification.reason}] ${shortSubject} -> ${classification.type}`);
+  } else {
+    log(`${tag} [CLAUDE] Classifying: ${shortSubject}...`);
+    const result = await classifier.classify(parsed);
+    if (!result) {
+      log(`${tag}   -> Classification failed, tags left unchanged for retry`);
+      return { status: "classify_failed", messageId };
+    }
+    classification = { ...result, source: "claude" };
+    log(`${tag}   -> ${result.type} (${(result.confidence * 100).toFixed(0)}%, stage ${result.stage}${result.reviewRequired ? ", REVIEW" : ""}, $${result.cost.toFixed(4)})`);
+  }
+
+  const isJobRelated = classification.type !== "other";
+  const wasJobRelated = oldType && oldType !== "other";
+  const changed = !!(oldType && oldType !== classification.type);
+  if (changed) log(`${tag}   moved: ${oldType} -> ${classification.type}`);
+
+  // Decide the server action
+  let action = { kind: "none" };
+  if (isJobRelated || classification.reviewRequired) {
+    const importData = buildImportPayload(parsed, classification);
+    if (REPROCESS && wasJobRelated) {
+      action = {
+        kind: "patch",
+        correction: oldType !== classification.type
+          ? { messageId: parsed.messageId, originalType: oldType, correctedType: classification.type }
+          : null,
+        update: { messageId: parsed.messageId, extractedData: importData.extractedData },
+      };
+    } else {
+      action = { kind: "post", importData };
+    }
+  } else if (REPROCESS && wasJobRelated) {
+    action = { kind: "delete", messageId: parsed.messageId };
+  }
+
+  return {
+    status: "classified",
+    messageId,
+    parsedMessageId: parsed.messageId,
+    oldType,
+    newType: classification.type,
+    changed,
+    action,
+  };
+}
+
+/**
+ * Sync one batch's server actions. Returns the set of messageIds (notmuch
+ * ids) whose server state is confirmed, so tags/progress can be committed.
+ */
+async function syncBatch(decisions) {
+  const confirmed = new Set();
+  const posts = decisions.filter((d) => d.action.kind === "post");
+  const patches = decisions.filter((d) => d.action.kind === "patch");
+  const deletes = decisions.filter((d) => d.action.kind === "delete");
+
+  decisions.filter((d) => d.action.kind === "none").forEach((d) => confirmed.add(d.messageId));
+
+  if (posts.length > 0) {
+    log(`Batch: POSTing ${posts.length} imports...`);
+    if (await sendToServer(posts.map((d) => d.action.importData))) posts.forEach((d) => confirmed.add(d.messageId));
+  }
+
+  if (patches.length > 0) {
+    const corrections = patches.map((d) => d.action.correction).filter(Boolean);
+    const updates = patches.map((d) => d.action.update);
+    log(`Batch: PATCHing ${corrections.length} reclassifications, ${updates.length} extraction updates...`);
+    if (await patchServer(corrections, updates)) patches.forEach((d) => confirmed.add(d.messageId));
+  }
+
+  if (deletes.length > 0) {
+    log(`Batch: DELETEing ${deletes.length} demoted imports...`);
+    const failed = await deleteFromServer(deletes.map((d) => d.action.messageId));
+    deletes.forEach((d) => {
+      if (!failed.has(d.action.messageId)) confirmed.add(d.messageId);
+    });
+  }
+
+  return confirmed;
+}
+
 async function main() {
   if (REPROCESS) {
     log(`REPROCESS MODE: Re-classifying and re-extracting ${ONLY ? `jobsync/${ONLY}` : "all tagged"} emails...${DRY_RUN ? " (DRY RUN)" : ""}`);
   } else {
     log(`Finding untagged emails...${DRY_RUN ? " (DRY RUN)" : ""}`);
+  }
+
+  if (!JOBSYNC_API_KEY && !DRY_RUN) {
+    log("ERROR: JOBSYNC_API_KEY not set (source ~/.jobsync/config)");
+    process.exit(1);
   }
 
   // Find emails to process
@@ -439,127 +589,77 @@ async function main() {
   }
 
   const classifier = createClassifier({ corrections, log });
-  log(`Classifier: model=${classifier.config.model} threshold=${classifier.config.threshold} concurrency=${CONCURRENCY}`);
-
-  // Collect server actions
-  const newImports = [];       // POST: newly job-related (was "other" or untagged)
-  const patchCorrections = []; // PATCH corrections: classification changed (job-related -> job-related)
-  const patchUpdates = [];     // PATCH updates: extractedData updates
-  const toDelete = [];         // DELETE: was job-related, now "other"
+  log(`Classifier: model=${classifier.config.model} threshold=${classifier.config.threshold} concurrency=${CONCURRENCY} batch=${BATCH}`);
 
   let processed = 0;
   let failed = 0;
   let moved = 0;
+  let unsynced = 0;
   const transitions = {};
 
-  const results = await runWithConcurrency(
-    emails,
-    async ({ messageId, filePath, oldType }, index, total) => {
-      const parsed = await parseEmailFile(filePath);
-      if (!parsed) {
-        return { status: "parse_failed" };
-      }
+  // Work in batches: classify -> sync server -> only then move tags and record
+  // progress for the confirmed ones. A server failure stops the run so the
+  // remaining mail is retried next time instead of drifting.
+  let aborted = false;
+  for (let offset = 0; offset < emails.length && !aborted; offset += BATCH) {
+    const batch = emails.slice(offset, offset + BATCH);
+    log(`--- batch ${offset / BATCH + 1}/${Math.ceil(emails.length / BATCH)} (${batch.length} mails) ---`);
 
-      const shortSubject = parsed.subject.substring(0, 40).replace(/\n/g, " ");
-      const tag = `[${index + 1}/${total}]`;
+    const results = await runWithConcurrency(
+      batch,
+      (item, index, total) => classifyOne(item, offset + index, emails.length, classifier),
+      CONCURRENCY
+    );
 
-      // Classify
-      let classification = classifyByRules(parsed);
-
-      if (classification) {
-        classification = { ...classification, source: "rules", stage: 0, reviewRequired: false };
-        log(`${tag} [FAST-PATH:${classification.reason}] ${shortSubject} -> ${classification.type}`);
+    const decisions = [];
+    for (const r of results) {
+      if (r.error) {
+        failed++;
+        log(`Worker error: ${r.error.message || r.error}`);
+      } else if (r.status !== "classified") {
+        failed++;
       } else {
-        log(`${tag} [CLAUDE] Classifying: ${shortSubject}...`);
-        const result = await classifier.classify(parsed);
-        if (!result) {
-          log(`${tag}   -> Classification failed, tags left unchanged for retry`);
-          return { status: "classify_failed" };
-        }
-        classification = { ...result, source: "claude" };
-        log(`${tag}   -> ${result.type} (${(result.confidence * 100).toFixed(0)}%, stage ${result.stage}${result.reviewRequired ? ", REVIEW" : ""}, $${result.cost.toFixed(4)})`);
+        decisions.push(r);
       }
+    }
 
-      // Update notmuch tag
-      await setClassificationTag(messageId, classification.type, oldType);
+    const confirmed = await syncBatch(decisions);
 
-      const isJobRelated = classification.type !== "other";
-      const wasJobRelated = oldType && oldType !== "other";
-      const changed = oldType && oldType !== classification.type;
-      if (changed) {
-        const key = `${oldType} -> ${classification.type}`;
-        transitions[key] = (transitions[key] || 0) + 1;
-        log(`${tag}   moved: ${key}`);
+    for (const d of decisions) {
+      if (!confirmed.has(d.messageId)) {
+        unsynced++;
+        continue;
       }
-
-      if (isJobRelated || classification.reviewRequired) {
-        const importData = buildImportPayload(parsed, classification);
-
-        if (REPROCESS && wasJobRelated) {
-          // Was job-related, still job-related: PATCH classification + extractedData
-          if (oldType !== classification.type) {
-            patchCorrections.push({
-              messageId: parsed.messageId,
-              originalType: oldType,
-              correctedType: classification.type,
-            });
-          }
-          patchUpdates.push({
-            messageId: parsed.messageId,
-            extractedData: importData.extractedData,
-          });
-        } else {
-          // New import: was untagged or was "other"
-          newImports.push(importData);
-        }
-      } else if (REPROCESS && wasJobRelated) {
-        // Was job-related, now confidently "other": delete from server
-        toDelete.push(parsed.messageId);
-      }
-
-      return { status: "done", messageId, oldType, newType: classification.type, changed: !!changed };
-    },
-    CONCURRENCY
-  );
-
-  for (const result of results) {
-    if (result.error || result.status === "classify_failed" || result.status === "parse_failed") {
-      failed++;
-      if (result.error) log(`Worker error: ${result.error.message || result.error}`);
-    } else {
+      await setClassificationTag(d.messageId, d.newType, d.oldType);
       processed++;
-      if (result.changed) moved++;
+      if (d.changed) {
+        moved++;
+        const key = `${d.oldType} -> ${d.newType}`;
+        transitions[key] = (transitions[key] || 0) + 1;
+      }
       if (REPROCESS) {
-        progress[result.messageId] = { oldType: result.oldType, newType: result.newType, ts: new Date().toISOString() };
+        progress[d.messageId] = { oldType: d.oldType, newType: d.newType, ts: new Date().toISOString() };
+      }
+    }
+    if (REPROCESS) saveProgress(progress);
+
+    if (decisions.length > 0 && confirmed.size < decisions.length) {
+      const pendingServer = decisions.filter((d) => d.action.kind !== "none").length;
+      if (pendingServer > 0 && confirmed.size === decisions.filter((d) => d.action.kind === "none").length) {
+        log(`Server sync failed for this whole batch; stopping so the remaining ${emails.length - offset - batch.length} mails are retried next run.`);
+        aborted = true;
       }
     }
   }
-  if (REPROCESS) saveProgress(progress);
 
   const t = classifier.totals;
-  log(`\nResults: ${processed} processed, ${failed} failed, ${moved} moved category`);
+  log(`\nResults: ${processed} processed, ${moved} moved category, ${failed} failed to classify, ${unsynced} not synced (tags unchanged, will retry)`);
   for (const [key, count] of Object.entries(transitions).sort((a, b) => b[1] - a[1])) {
     log(`  ${count.toString().padStart(4)}  ${key}`);
   }
   log(`Claude: calls=${t.calls} stage1=${t.stage1} stage2=${t.stage2} failures=${t.failures} cost=$${t.cost.toFixed(4)} time=${(t.durationMs / 1000).toFixed(1)}s`);
-
-  // Server sync
-  if (newImports.length > 0) {
-    log(`Sending ${newImports.length} new imports to server...`);
-    await sendToServer(newImports);
-  }
-
-  if (patchCorrections.length > 0 || patchUpdates.length > 0) {
-    log(`Patching server: ${patchCorrections.length} reclassifications, ${patchUpdates.length} extraction updates...`);
-    await patchServer(patchCorrections, patchUpdates);
-  }
-
-  if (toDelete.length > 0) {
-    log(`Deleting ${toDelete.length} demoted emails from server...`);
-    await deleteFromServer(toDelete);
-  }
-
-  log("Done!");
+  log(aborted ? "Stopped early because the server could not be updated." : "Done!");
+  if (aborted || unsynced > 0) process.exitCode = 3;
 }
 
 main().catch((error) => {

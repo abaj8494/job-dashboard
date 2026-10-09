@@ -247,3 +247,47 @@ describe("createClassifier", () => {
     expect(r.extractedData).toMatchObject({ company: "Canva", jobTitle: "Data Engineer", location: "Sydney" });
   });
 });
+
+describe("runClaudeJson envelope parsing", () => {
+  const { runClaudeJson, DEFAULTS } = require("../scripts/lib/claude-classifier");
+  const params = { stage: 1, label: "x", model: "opus", effort: "low", maxBudgetUsd: "0.25", systemPrompt: "S", jsonSchema: { type: "object" }, prompt: "p" };
+  const cfg = (spawnImpl) => ({ ...DEFAULTS, cwd: require("os").tmpdir(), spawnImpl });
+  const envelope = (over) => JSON.stringify({ type: "result", subtype: "success", is_error: false, stop_reason: "tool_use", num_turns: 2, total_cost_usd: 0.0123, duration_ms: 2000, duration_api_ms: 1900, usage: { input_tokens: 2, output_tokens: 100, cache_read_input_tokens: 5000, cache_creation_input_tokens: 0 }, modelUsage: { "claude-opus-5-5": {} }, result: "{\"category\":\"other\"}", structured_output: { category: "other", confidence: 0.9, reason: "r" }, ...over });
+
+  test("success envelope: structured_output, usage record, tool_use stop reason is not a failure", async () => {
+    const spawnImpl = jest.fn(async () => ({ code: 0, stdout: envelope({}), stderr: "", timedOut: false }));
+    const r = await runClaudeJson(params, cfg(spawnImpl));
+    expect(r.ok).toBe(true);
+    expect(r.data).toEqual({ category: "other", confidence: 0.9, reason: "r" });
+    expect(r.usage).toMatchObject({ stage: 1, label: "x", model: "claude-opus-5-5", cost_usd: 0.0123, duration_ms: 2000, cache_read_input_tokens: 5000, num_turns: 2 });
+    expect(spawnImpl.mock.calls[0][1]).toContain("--json-schema");
+  });
+
+  test("falls back to parsing result text when structured_output is missing", async () => {
+    const spawnImpl = async () => ({ code: 0, stdout: envelope({ structured_output: undefined, result: "{\"category\":\"other\",\"confidence\":1,\"reason\":\"t\"}" }), stderr: "", timedOut: false });
+    const r = await runClaudeJson(params, cfg(spawnImpl));
+    expect(r.ok).toBe(true);
+    expect(r.data.category).toBe("other");
+  });
+
+  test("error envelope with 429 is retryable; 400 is not", async () => {
+    const r429 = await runClaudeJson(params, cfg(async () => ({ code: 1, stdout: envelope({ subtype: "error", is_error: true, api_error_status: 429, result: "rate limited", structured_output: undefined }), stderr: "", timedOut: false })));
+    expect(r429.ok).toBe(false);
+    expect(r429.retryable).toBe(true);
+    expect(r429.usage.is_error).toBe(true);
+    const r400 = await runClaudeJson(params, cfg(async () => ({ code: 1, stdout: envelope({ subtype: "error", is_error: true, api_error_status: 400, result: "bad", structured_output: undefined }), stderr: "", timedOut: false })));
+    expect(r400.ok).toBe(false);
+    expect(r400.retryable).toBe(false);
+  });
+
+  test("timeout is retryable; usage/argument error (non-JSON stdout) is not", async () => {
+    const t = await runClaudeJson(params, cfg(async () => ({ code: null, stdout: "", stderr: "", timedOut: true })));
+    expect(t).toMatchObject({ ok: false, retryable: true });
+    const bad = await runClaudeJson(params, cfg(async () => ({ code: 1, stdout: "", stderr: "Error: --json-schema is not a valid JSON Schema", timedOut: false })));
+    expect(bad.ok).toBe(false);
+    expect(bad.retryable).toBe(false);
+    expect(bad.error).toMatch(/json-schema/);
+    const net = await runClaudeJson(params, cfg(async () => ({ code: 1, stdout: "", stderr: "fetch failed: ECONNRESET", timedOut: false })));
+    expect(net.retryable).toBe(true);
+  });
+});

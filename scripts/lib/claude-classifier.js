@@ -60,6 +60,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** The CLI is run from ~/.jobsync (no project settings there); create it if missing. */
+function ensureCwd(cwd) {
+  try {
+    fs.mkdirSync(cwd, { recursive: true });
+    return cwd;
+  } catch (e) {
+    return os.tmpdir();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Preflight: prove the CLI is logged in before any spend
 // ---------------------------------------------------------------------------
@@ -72,7 +82,7 @@ function authStatus(opts = {}) {
       resolve({ error: `claude binary missing: ${bin}` });
       return;
     }
-    execFile(bin, ["auth", "status", "--json"], { timeout, cwd: opts.cwd || DEFAULTS.cwd, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(bin, ["auth", "status", "--json"], { timeout, cwd: ensureCwd(opts.cwd || DEFAULTS.cwd), maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       let parsed = null;
       try {
         parsed = JSON.parse(stdout);
@@ -233,7 +243,8 @@ function usageRecord(envelope, meta) {
 async function runClaudeJson(params, cfg) {
   const bin = cfg.bin;
   const args = buildArgs(params);
-  const { code, stdout, stderr, timedOut } = await spawnClaude(bin, args, { cwd: cfg.cwd, timeoutMs: cfg.timeoutMs });
+  const spawnImpl = cfg.spawnImpl || spawnClaude;
+  const { code, stdout, stderr, timedOut } = await spawnImpl(bin, args, { cwd: ensureCwd(cfg.cwd), timeoutMs: cfg.timeoutMs });
 
   if (timedOut) {
     return { ok: false, error: `timeout after ${cfg.timeoutMs}ms`, retryable: true };
