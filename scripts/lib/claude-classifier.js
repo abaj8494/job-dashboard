@@ -52,6 +52,9 @@ const DEFAULTS = {
   cwd: JOBSYNC_DIR,
   retries: 1,
   retryDelayMs: 5000,
+  // After this many consecutive failed classifications (e.g. a 429 storm or a
+  // logged-out CLI) classify() returns null without spending until a success.
+  maxConsecutiveFailures: parseInt(process.env.JOBSYNC_MAX_CONSECUTIVE_FAILURES || "5", 10),
 };
 
 const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
@@ -320,7 +323,19 @@ function createClassifier(options = {}) {
   const log = cfg.log || (() => {});
   const runner = cfg.runner || runClaudeJson;
   const systemPrompt = buildSystemPrompt(cfg.corrections || []);
-  const totals = { calls: 0, cost: 0, durationMs: 0, stage1: 0, stage2: 0, failures: 0 };
+  const totals = { calls: 0, cost: 0, durationMs: 0, stage1: 0, stage2: 0, failures: 0, consecutiveFailures: 0, tripped: false, skippedWhileTripped: 0 };
+
+  function noteOutcome(ok) {
+    if (ok) {
+      totals.consecutiveFailures = 0;
+      return;
+    }
+    totals.consecutiveFailures++;
+    if (!totals.tripped && totals.consecutiveFailures >= cfg.maxConsecutiveFailures) {
+      totals.tripped = true;
+      log(`Circuit breaker: ${totals.consecutiveFailures} consecutive classification failures; no further calls this run.`);
+    }
+  }
 
   function appendUsage(record) {
     totals.calls++;
@@ -355,6 +370,10 @@ function createClassifier(options = {}) {
   }
 
   async function runStage(stage, email, label) {
+    if (totals.tripped) {
+      totals.skippedWhileTripped++;
+      return null;
+    }
     const isStage1 = stage === 1;
     const result = await callWithRetry({
       stage,
@@ -366,14 +385,19 @@ function createClassifier(options = {}) {
       jsonSchema: isStage1 ? STAGE1_JSON_SCHEMA : STAGE2_JSON_SCHEMA,
       prompt: isStage1 ? buildStage1Prompt(email) : buildStage2Prompt(email),
     });
-    if (!result.ok) return null;
+    if (!result.ok) {
+      noteOutcome(false);
+      return null;
+    }
 
     const parsed = (isStage1 ? Stage1Schema : Stage2Schema).safeParse(result.data);
     if (!parsed.success) {
       totals.failures++;
       log(`Claude stage ${stage} returned invalid structured output: ${parsed.error.issues.map((i) => i.path.join(".") + " " + i.message).join("; ")}`);
+      noteOutcome(false);
       return null;
     }
+    noteOutcome(true);
     return {
       ...parsed.data,
       cost: result.usage?.cost_usd || 0,

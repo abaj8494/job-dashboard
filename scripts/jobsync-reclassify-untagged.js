@@ -249,18 +249,20 @@ async function setClassificationTag(messageId, newType, oldType) {
 }
 
 /**
- * POST new imports. Returns true only when the server confirmed with a numeric
- * `processed` count (guards the http->https redirect-to-GET silent drop).
+ * POST new imports. Returns { ok, failed:Set<messageId> }. ok requires a
+ * numeric `processed` count (guards the http->https redirect-to-GET silent
+ * drop); `failed` are the ids the server reported it could not store.
  */
 async function sendToServer(imports) {
-  if (imports.length === 0) return true;
+  const none = { ok: false, failed: new Set() };
+  if (imports.length === 0) return { ok: true, failed: new Set() };
   if (!JOBSYNC_API_KEY) {
     log("JOBSYNC_API_KEY not set; cannot POST imports");
-    return false;
+    return none;
   }
   if (DRY_RUN) {
     log(`[dry-run] would POST ${imports.length} imports`);
-    return true;
+    return { ok: true, failed: new Set() };
   }
 
   try {
@@ -276,34 +278,38 @@ async function sendToServer(imports) {
     if (!response.ok) {
       const text = await response.text();
       log(`Server POST returned ${response.status}: ${text}`);
-      return false;
+      return none;
     }
 
     const result = await response.json();
     if (typeof result.processed !== "number") {
       log(`ERROR: server did not confirm the import (no 'processed' count); ensure JOBSYNC_API_URL uses https://. URL=${JOBSYNC_API_URL}`);
-      return false;
+      return none;
     }
-    log(`Server POST: ${result.processed} processed, ${result.skipped} skipped, ${result.filed ?? 0} filed, ${result.pending ?? 0} pending`);
-    return true;
+    const failed = new Set(Array.isArray(result.failedMessageIds) ? result.failedMessageIds : []);
+    log(`Server POST: ${result.processed} processed, ${result.skipped} skipped, ${result.filed ?? 0} filed, ${result.pending ?? 0} pending, ${failed.size} failed`);
+    if (failed.size > 0) log(`  not stored (left for retry): ${[...failed].join(", ")}`);
+    return { ok: true, failed };
   } catch (error) {
     log(`Failed to send to server: ${error.message}`);
-    return false;
+    return none;
   }
 }
 
 /**
- * PATCH corrections + extractedData updates. Returns true on server confirmation.
+ * PATCH corrections + extractedData updates. Returns
+ * { ok, failed:Set<messageId>, notFound:Set<messageId> }.
  */
 async function patchServer(corrections, updates) {
-  if (corrections.length === 0 && updates.length === 0) return true;
+  const none = { ok: false, failed: new Set(), notFound: new Set() };
+  if (corrections.length === 0 && updates.length === 0) return { ok: true, failed: new Set(), notFound: new Set() };
   if (!JOBSYNC_API_KEY) {
     log("JOBSYNC_API_KEY not set; cannot PATCH");
-    return false;
+    return none;
   }
   if (DRY_RUN) {
     log(`[dry-run] would PATCH ${corrections.length} corrections, ${updates.length} updates`);
-    return true;
+    return { ok: true, failed: new Set(), notFound: new Set() };
   }
 
   try {
@@ -323,19 +329,21 @@ async function patchServer(corrections, updates) {
     if (!response.ok) {
       const text = await response.text();
       log(`Server PATCH returned ${response.status}: ${text}`);
-      return false;
+      return none;
     }
 
     const result = await response.json();
     if (typeof result.updated !== "number") {
       log(`ERROR: server did not confirm the PATCH (no 'updated' count); ensure JOBSYNC_API_URL uses https://`);
-      return false;
+      return none;
     }
-    log(`Server PATCH: ${result.updated} updated, ${result.notFound} not found, ${result.filed ?? 0} filed`);
-    return true;
+    const failed = new Set(Array.isArray(result.failedMessageIds) ? result.failedMessageIds : []);
+    const notFound = new Set(Array.isArray(result.notFoundMessageIds) ? result.notFoundMessageIds : []);
+    log(`Server PATCH: ${result.updated} updated, ${result.notFound} not found, ${result.filed ?? 0} filed, ${failed.size} failed`);
+    return { ok: true, failed, notFound };
   } catch (error) {
     log(`Failed to patch server: ${error.message}`);
-    return false;
+    return none;
   }
 }
 
@@ -382,6 +390,7 @@ async function deleteFromServer(messageIds) {
         deleted++;
       } else if (result.kept) {
         kept++;
+        log(`  kept on server (already filed to a job; local tag moves to other): ${messageId}`);
       } else {
         notFound++;
       }
@@ -482,6 +491,7 @@ async function classifyOne({ messageId, filePath, oldType }, index, total, class
     if (REPROCESS && wasJobRelated) {
       action = {
         kind: "patch",
+        importData,
         correction: oldType !== classification.type
           ? { messageId: parsed.messageId, originalType: oldType, correctedType: classification.type }
           : null,
@@ -527,16 +537,37 @@ async function syncBatch(decisions) {
 
   decisions.filter((d) => d.action.kind === "none").forEach((d) => confirmed.add(d.messageId));
 
-  if (posts.length > 0) {
-    log(`Batch: POSTing ${posts.length} imports...`);
-    if (await sendToServer(posts.map((d) => d.action.importData))) posts.forEach((d) => confirmed.add(d.messageId));
-  }
-
+  // Patch first: anything the server has never seen comes back notFound and
+  // is POSTed below as a new import instead (heals pre-existing drift).
+  const fallbackPosts = [];
   if (patches.length > 0) {
     const corrections = patches.map((d) => d.action.correction).filter(Boolean);
     const updates = patches.map((d) => d.action.update);
     log(`Batch: PATCHing ${corrections.length} reclassifications, ${updates.length} extraction updates...`);
-    if (await patchServer(corrections, updates)) patches.forEach((d) => confirmed.add(d.messageId));
+    const r = await patchServer(corrections, updates);
+    if (r.ok) {
+      for (const d of patches) {
+        const id = d.action.update.messageId;
+        if (r.failed.has(id)) continue;
+        if (r.notFound.has(id)) {
+          fallbackPosts.push(d);
+          continue;
+        }
+        confirmed.add(d.messageId);
+      }
+      if (fallbackPosts.length > 0) log(`  ${fallbackPosts.length} not on server; POSTing as new imports`);
+    }
+  }
+
+  const allPosts = [...posts, ...fallbackPosts];
+  if (allPosts.length > 0) {
+    log(`Batch: POSTing ${allPosts.length} imports...`);
+    const r = await sendToServer(allPosts.map((d) => d.action.importData));
+    if (r.ok) {
+      allPosts.forEach((d) => {
+        if (!r.failed.has(d.action.importData.messageId)) confirmed.add(d.messageId);
+      });
+    }
   }
 
   if (deletes.length > 0) {
@@ -631,6 +662,10 @@ async function main() {
       } else {
         decisions.push(r);
       }
+    }
+    if (classifier.totals.tripped) {
+      log(`Classifier circuit breaker tripped (${classifier.config.maxConsecutiveFailures} consecutive failures); stopping after this batch.`);
+      aborted = true;
     }
 
     const confirmed = await syncBatch(decisions);

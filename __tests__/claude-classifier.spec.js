@@ -221,6 +221,28 @@ describe("createClassifier", () => {
     expect(noRetry).toHaveBeenCalledTimes(1);
   });
 
+  test("circuit breaker stops spending after N consecutive failures and resets on success", async () => {
+    const fail = { ok: false, error: "429", retryable: false };
+    const runner = fakeRunner([fail, fail, fail, ok({ category: "other", confidence: 0.9, reason: "x" })]);
+    const c = createClassifier({ ...base, runner, maxConsecutiveFailures: 3 });
+    expect(await c.classify(companyEmail)).toBeNull();
+    expect(await c.classify(companyEmail)).toBeNull();
+    expect(await c.classify(companyEmail)).toBeNull();
+    expect(c.totals.tripped).toBe(true);
+    expect(await c.classify(companyEmail)).toBeNull(); // not called
+    expect(runner).toHaveBeenCalledTimes(3);
+    expect(c.totals.skippedWhileTripped).toBe(1);
+
+    const runner2 = fakeRunner([fail, ok({ category: "other", confidence: 0.9, reason: "x" }), fail, fail]);
+    const c2 = createClassifier({ ...base, runner: runner2, maxConsecutiveFailures: 3 });
+    await c2.classify(companyEmail);
+    await c2.classify(companyEmail);
+    expect(c2.totals.consecutiveFailures).toBe(0);
+    await c2.classify(companyEmail);
+    await c2.classify(companyEmail);
+    expect(c2.totals.tripped).toBe(false);
+  });
+
   test("structured output that fails schema validation returns null", async () => {
     const runner = fakeRunner([ok({ category: "spam", confidence: 2, reason: "" })]);
     const c = createClassifier({ ...base, runner });

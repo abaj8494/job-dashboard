@@ -13,6 +13,8 @@ interface SyncResult {
   filed: number;
   pending: number;
   errors: string[];
+  /** messageIds whose import threw (not stored); clients must NOT tag these locally. */
+  failedMessageIds: string[];
 }
 
 /**
@@ -113,6 +115,7 @@ async function handlePreClassifiedImports(
     filed: 0,
     pending: 0,
     errors: [],
+    failedMessageIds: [],
   };
 
   // Ensure email accounts exist
@@ -159,6 +162,7 @@ async function handlePreClassifiedImports(
 
       if (!emailAccount) {
         result.errors.push(`No email account for ${accountEmail}`);
+        result.failedMessageIds.push(imp.messageId);
         continue;
       }
 
@@ -214,6 +218,7 @@ async function handlePreClassifiedImports(
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error";
       result.errors.push(`Error importing ${imp.messageId}: ${errorMessage}`);
+      result.failedMessageIds.push(imp.messageId);
     }
   }
 
@@ -279,6 +284,8 @@ export const PATCH = async (req: NextRequest) => {
     let notFound = 0;
     let filed = 0;
     const errors: string[] = [];
+    const notFoundMessageIds: string[] = [];
+    const failedMessageIds: string[] = [];
 
     // Handle corrections (classification changes)
     if (corrections && Array.isArray(corrections)) {
@@ -297,6 +304,7 @@ export const PATCH = async (req: NextRequest) => {
 
           if (!emailImport) {
             notFound++;
+            notFoundMessageIds.push(correction.messageId);
             continue;
           }
 
@@ -315,6 +323,7 @@ export const PATCH = async (req: NextRequest) => {
           errors.push(
             `Error updating ${correction.messageId}: ${errorMessage}`
           );
+          failedMessageIds.push(correction.messageId);
         }
       }
     }
@@ -336,6 +345,7 @@ export const PATCH = async (req: NextRequest) => {
 
           if (!emailImport) {
             notFound++;
+            notFoundMessageIds.push(update.messageId);
             continue;
           }
 
@@ -403,6 +413,7 @@ export const PATCH = async (req: NextRequest) => {
           errors.push(
             `Error updating ${update.messageId}: ${errorMessage}`
           );
+          failedMessageIds.push(update.messageId);
         }
       }
     }
@@ -412,6 +423,8 @@ export const PATCH = async (req: NextRequest) => {
       updated,
       notFound,
       filed,
+      notFoundMessageIds,
+      failedMessageIds,
       errors: errors.length > 0 ? errors : undefined,
     });
   } catch (error) {

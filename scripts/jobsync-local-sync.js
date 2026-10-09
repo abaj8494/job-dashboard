@@ -210,10 +210,15 @@ function isJobRelated(classification) {
   return classification.type !== "other";
 }
 
+/**
+ * Returns { ok, failed: Set<messageId> }. `ok` false means nothing can be
+ * trusted (transport/redirect failure); `failed` lists imports the server
+ * reported it could not store, which must stay untagged for retry.
+ */
 async function sendToServer(imports) {
   if (DRY_RUN) {
     log(`[dry-run] would send ${imports.length} imports to ${JOBSYNC_API_URL}`);
-    return true;
+    return { ok: true, failed: new Set() };
   }
   try {
     const response = await fetch(JOBSYNC_API_URL, {
@@ -228,7 +233,7 @@ async function sendToServer(imports) {
     if (!response.ok) {
       const text = await response.text();
       log(`Server returned ${response.status}: ${text}`);
-      return false;
+      return { ok: false, failed: new Set() };
     }
 
     const result = await response.json();
@@ -245,13 +250,17 @@ async function sendToServer(imports) {
           `This usually means JOBSYNC_API_URL redirected the POST — ensure it uses https://. ` +
           `URL=${JOBSYNC_API_URL}`
       );
-      return false;
+      return { ok: false, failed: new Set() };
     }
 
-    return true;
+    const failed = new Set(Array.isArray(result.failedMessageIds) ? result.failedMessageIds : []);
+    if (failed.size > 0) {
+      log(`Server could not store ${failed.size} import(s); they stay untagged for retry: ${[...failed].join(", ")}`);
+    }
+    return { ok: true, failed };
   } catch (error) {
     log(`Failed to send to server: ${error.message}`);
-    return false;
+    return { ok: false, failed: new Set() };
   }
 }
 
@@ -437,13 +446,18 @@ async function main() {
 
   if (toSend.length > 0) {
     log(`Sending ${toSend.length} emails to server...`);
-    const success = await sendToServer(toSend);
-    if (success) {
-      // Tag as processed only now that the server has confirmed the import.
+    const { ok, failed } = await sendToServer(toSend);
+    if (ok) {
+      // Tag as processed only now that the server has confirmed the import,
+      // and only the ones it actually stored.
+      let tagged = 0;
       for (const imp of toSend) {
+        if (failed.has(imp.messageId)) continue;
         await markEmailProcessed(imp.messageId, imp.classification);
+        tagged++;
       }
-      log("Sync completed successfully");
+      log(`Sync completed: ${tagged} tagged${failed.size ? `, ${failed.size} left for retry` : ""}`);
+      if (failed.size > 0) process.exitCode = 3;
     } else {
       log("Sync failed - emails left untagged for retry - check server logs");
     }

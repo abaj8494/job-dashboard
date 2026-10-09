@@ -76,11 +76,20 @@ function clean(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function containsWords(haystack: string, needle: string): boolean {
+  return new RegExp(`(^|\\W)${escapeRegExp(needle)}(\\W|$)`, "i").test(haystack);
+}
+
 function titlesMatch(a: string, b: string): boolean {
   if (!a || !b) return false;
   if (a === b) return true;
-  // "Senior Software Engineer" vs "Software Engineer" etc.
-  return a.includes(b) || b.includes(a);
+  // "Senior Software Engineer" vs "Software Engineer" etc., on word boundaries
+  // so "Engineer" never matches "Engineering Manager".
+  return containsWords(a, b) || containsWords(b, a);
 }
 
 /**
@@ -107,10 +116,12 @@ export async function autoFileImport(
   const titleValue = norm(jobTitle);
 
   // ---- 1. Try to link to an existing job at this company --------------------
+  // Exact (case-insensitive) company name only: a substring match would file
+  // "Canva" mail against "Canvas Co". Unknown spellings go pending instead.
   const candidates = await db.job.findMany({
     where: {
       userId,
-      Company: { OR: [{ value: companyValue }, { label: { contains: company } }] },
+      Company: { value: companyValue },
     },
     include: { JobTitle: true, Status: true, Company: true },
     orderBy: { createdAt: "desc" },

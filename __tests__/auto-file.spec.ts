@@ -150,6 +150,19 @@ describe("autoFileImport", () => {
     });
   });
 
+  test("company match is exact (case-insensitive), never substring", async () => {
+    const db = makeDb();
+    await autoFileImport(db as never, "u1", { ...base, classification: "rejection", extractedData: { company: "Canva", jobTitle: "Engineer" } });
+    expect(db.job.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: "u1", Company: { value: "canva" } } }));
+  });
+
+  test("title containment is on word boundaries", async () => {
+    const db = makeDb();
+    db.job.findMany.mockResolvedValue([existingJob({ JobTitle: { label: "Engineering Manager" } }), existingJob({ id: "job-2", JobTitle: { label: "Senior Software Engineer" } })]);
+    const r = await autoFileImport(db as never, "u1", { ...base, classification: "interview", extractedData: { company: "Acme", jobTitle: "Software Engineer" } });
+    expect(r).toMatchObject({ action: "linked", jobId: "job-2" });
+  });
+
   test("no job and no title stays pending", async () => {
     const db = makeDb();
     const r = await autoFileImport(db as never, "u1", { ...base, classification: "rejection", extractedData: { company: "Acme" } });
