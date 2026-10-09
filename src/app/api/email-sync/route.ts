@@ -230,7 +230,10 @@ async function handlePreClassifiedImports(
  *
  * Update email imports. Supports two modes:
  * 1. corrections: [{ messageId, originalType, correctedType }] - Update classification
- * 2. updates: [{ messageId, extractedData }] - Update extracted data (company, jobTitle, etc.)
+ * 2. updates: [{ messageId, extractedData, classification?, confidence?, reviewRequired? }]
+ *    - Update extracted data (company, jobTitle, etc.). When the update carries
+ *      reviewRequired=false and the import is still pending, it is auto-filed
+ *      the same way a fresh confident import is (backfill of the pending backlog).
  */
 export const PATCH = async (req: NextRequest) => {
   // Verify API key
@@ -256,7 +259,14 @@ export const PATCH = async (req: NextRequest) => {
     const updates = body.updates as Array<{
       messageId: string;
       extractedData: Record<string, string>;
+      classification?: string;
+      confidence?: number;
+      reviewRequired?: boolean;
+      classificationStage?: number | null;
+      classificationReason?: string | null;
     }> | undefined;
+
+    const user = await prisma.user.findFirst();
 
     if (!corrections && !updates) {
       return NextResponse.json(
@@ -267,6 +277,7 @@ export const PATCH = async (req: NextRequest) => {
 
     let updated = 0;
     let notFound = 0;
+    let filed = 0;
     const errors: string[] = [];
 
     // Handle corrections (classification changes)
@@ -338,14 +349,51 @@ export const PATCH = async (req: NextRequest) => {
             // Ignore parse errors
           }
 
-          const mergedData = { ...existingData, ...update.extractedData };
+          const mergedData: Record<string, unknown> = { ...existingData, ...update.extractedData };
+          if (update.classificationStage) mergedData.classifierStage = update.classificationStage;
+          if (update.classificationReason) mergedData.classifierReason = update.classificationReason;
 
-          await prisma.emailImport.update({
-            where: { id: emailImport.id },
-            data: {
-              extractedData: JSON.stringify(mergedData),
-              updatedAt: new Date(),
-            },
+          const classification = update.classification || emailImport.classification;
+          const confidence = typeof update.confidence === "number" ? update.confidence : emailImport.confidence;
+
+          await prisma.$transaction(async (tx) => {
+            let status = emailImport.status;
+            let jobId = emailImport.jobId;
+            let reviewedAt = emailImport.reviewedAt;
+
+            // Backfill: a pending import the classifier is now confident about
+            // gets filed exactly like a fresh confident import.
+            if (emailImport.status === "pending" && update.reviewRequired === false && user) {
+              const outcome = await autoFileImport(tx, user.id, {
+                subject: emailImport.subject,
+                bodyText: emailImport.bodyText,
+                emailDate: emailImport.emailDate,
+                classification,
+                confidence,
+                reviewRequired: false,
+                extractedData: mergedData as ImportExtractedData,
+              });
+              mergedData.autoFileNote = outcome.note;
+              if (outcome.status === "approved") {
+                status = "approved";
+                jobId = outcome.jobId;
+                reviewedAt = new Date();
+                filed++;
+              }
+            }
+
+            await tx.emailImport.update({
+              where: { id: emailImport.id },
+              data: {
+                classification,
+                confidence,
+                extractedData: JSON.stringify(mergedData),
+                status,
+                jobId,
+                reviewedAt,
+                updatedAt: new Date(),
+              },
+            });
           });
 
           updated++;
@@ -363,6 +411,7 @@ export const PATCH = async (req: NextRequest) => {
       message: "Updates applied",
       updated,
       notFound,
+      filed,
       errors: errors.length > 0 ? errors : undefined,
     });
   } catch (error) {

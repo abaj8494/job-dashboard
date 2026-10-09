@@ -331,7 +331,7 @@ async function patchServer(corrections, updates) {
       log(`ERROR: server did not confirm the PATCH (no 'updated' count); ensure JOBSYNC_API_URL uses https://`);
       return false;
     }
-    log(`Server PATCH: ${result.updated} updated, ${result.notFound} not found`);
+    log(`Server PATCH: ${result.updated} updated, ${result.notFound} not found, ${result.filed ?? 0} filed`);
     return true;
   } catch (error) {
     log(`Failed to patch server: ${error.message}`);
@@ -485,7 +485,17 @@ async function classifyOne({ messageId, filePath, oldType }, index, total, class
         correction: oldType !== classification.type
           ? { messageId: parsed.messageId, originalType: oldType, correctedType: classification.type }
           : null,
-        update: { messageId: parsed.messageId, extractedData: importData.extractedData },
+        // Carries the new classification + confidence so a pending import on
+        // the server is auto-filed when the classifier is now confident.
+        update: {
+          messageId: parsed.messageId,
+          extractedData: importData.extractedData,
+          classification: importData.classification,
+          confidence: importData.confidence,
+          reviewRequired: importData.reviewRequired,
+          classificationStage: importData.classificationStage,
+          classificationReason: importData.classificationReason,
+        },
       };
     } else {
       action = { kind: "post", importData };
