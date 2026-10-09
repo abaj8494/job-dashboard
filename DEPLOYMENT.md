@@ -21,8 +21,8 @@ Deploy JobSync to your server at `jobs.abaj.ai` with Docker and nginx.
 ┌──────────────────────────────────┴──────────────────────────────┐
 │                    Local Machine                                │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐  │
-│  │   notmuch    │───▶│   Ollama     │───▶│  local-sync.ts   │  │
-│  │   (mail)     │    │   (LLM)      │    │  (sends to VPS)  │  │
+│  │   notmuch    │───▶│ claude CLI   │───▶│  local-sync.js   │  │
+│  │   (mail)     │    │ (headless)   │    │  (sends to VPS)  │  │
 │  └──────────────┘    └──────────────┘    └──────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -198,13 +198,24 @@ Add to `~/.jobsync/config`:
 JOBSYNC_API_KEY="<same-key-as-server-.env.production>"
 JOBSYNC_API_URL="https://jobs.abaj.ai/api/email-sync"
 
-# Ollama (local)
-OLLAMA_BASE_URL="http://localhost:11434"
-OLLAMA_MODEL="llama3.2"
-
 # Email accounts
 MONITORED_EMAILS="j@abaj.ai,aayushbajaj7@gmail.com"
+
+# Classifier (optional overrides; defaults shown)
+# CLAUDE_BIN="$HOME/.local/bin/claude"      # Claude Code CLI, must be logged in (`claude auth status`)
+# JOBSYNC_CLAUDE_MODEL="opus"
+# JOBSYNC_CONFIDENCE_THRESHOLD="0.8"        # below this, stage 2 reads the full body
+# JOBSYNC_STAGE2_FOR_EXTRACTION="1"         # also read the body of confident job mail to extract company/title
+# JOBSYNC_CLAUDE_MAX_BUDGET_USD="0.25"      # per-call cap
+# JOBSYNC_CLAUDE_TIMEOUT_MS="120000"
+# JOBSYNC_CONCURRENCY="2"                   # parallel CLI calls (each has ~3s startup)
 ```
+
+Classification runs through the local Claude Code CLI in headless mode
+(`claude -p --output-format json --tools "" --json-schema ...`), billed to the
+owner's claude.ai subscription. There is no API key and no Ollama. Every call is
+logged to `~/.jobsync/claude-usage.jsonl` (cost, duration, tokens). If the CLI
+is logged out, the sync alerts and leaves mail untagged for the next run.
 
 ### 2. Install Local Sync Dependencies
 
@@ -223,29 +234,28 @@ Edit `~/Maildir/.notmuch/hooks/post-new`:
 # Source config
 source ~/.jobsync/config
 
-# Use the TypeScript local sync script
-cd /Users/aayushbajaj/Documents/code-private/jobsync
-npx ts-node scripts/jobsync-local-sync.ts &
+# Record owner corrections (jobsync-was/* tags), then classify and sync
+cd /Users/aayushbajaj/lattice/code/private/jobsync
+node scripts/jobsync-scan-corrections.js >> ~/.jobsync/local-sync.log 2>&1
+node scripts/jobsync-local-sync.js >> ~/.jobsync/local-sync.log 2>&1
 ```
 
-Or for the simpler shell-based approach (calls local API which uses Ollama):
-```bash
-#!/bin/bash
-# For local development (when running npm run dev locally)
-/Users/aayushbajaj/Documents/code-private/jobsync/scripts/jobsync-email-hook.sh &
-```
+The live hook is `~/Maildir/.notmuch/hooks/post-new` (notmuch's `database.hook_dir`).
 
 ### 4. Test Local Sync
 
 ```bash
-# Make sure Ollama is running
-ollama serve &
+# Prove the CLI is logged in
+claude auth status
 
-# Test the sync
+# Classify new mail without tagging or sending anything
 cd /path/to/jobsync
-JOBSYNC_API_KEY="your-key" \
-JOBSYNC_API_URL="https://jobs.abaj.ai/api/email-sync" \
-npx ts-node scripts/jobsync-local-sync.ts
+source ~/.jobsync/config
+node scripts/jobsync-local-sync.js --dry-run --limit 5
+
+# Measure the classifier against real labelled mail before trusting it
+node scripts/jobsync-eval-classifier.js --build
+node scripts/jobsync-eval-classifier.js --run
 ```
 
 ---

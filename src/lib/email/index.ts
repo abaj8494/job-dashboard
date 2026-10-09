@@ -16,9 +16,3 @@ export {
   isJobBoardDomain,
   type ParsedEmail,
 } from "./parser";
-
-export {
-  classifyEmail,
-  type EmailClassification,
-  type ExtractedJobData,
-} from "./classifier";

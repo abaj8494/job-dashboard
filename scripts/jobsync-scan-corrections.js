@@ -3,7 +3,8 @@
  * Scan for User Corrections Script
  *
  * Detects when users have manually changed jobsync classification tags
- * and records them as corrections for few-shot learning.
+ * and records them as corrections for few-shot learning (they go into the
+ * Claude classifier's system prompt, see scripts/lib/prompts.js).
  *
  * Usage:
  *   node scripts/jobsync-scan-corrections.js
@@ -25,7 +26,8 @@ const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
 const { CLASSIFICATION_TYPES, isHighVarianceCorrection, htmlToText, classifyByRules } = require("./lib/classification-rules");
-const { extractByRules, buildExtractionPrompt, parseLLMResponse, mergeExtractedData, needsLLMFallback } = require("./lib/extraction-rules");
+const { extractByRules, mergeExtractedData, needsLLMFallback } = require("./lib/extraction-rules");
+const { createClassifier, preflight, alertCliFailure } = require("./lib/claude-classifier");
 
 const execAsync = promisify(exec);
 
@@ -36,8 +38,20 @@ const CORRECTIONS_FILE = path.join(JOBSYNC_DIR, "corrections.json");
 const JOBSYNC_API_URL =
   process.env.JOBSYNC_API_URL || "http://localhost:3000/api/email-sync";
 const JOBSYNC_API_KEY = process.env.JOBSYNC_API_KEY || "";
-const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
-const OLLAMA_EXTRACTION_MODEL = process.env.OLLAMA_EXTRACTION_MODEL || "qwen2.5:14b";
+
+// Lazily created Claude classifier, used only to extract company/jobTitle when
+// a correction promotes an "other" email to job-related and the rules can't.
+let claudeClassifier = null;
+async function getClaudeExtractor() {
+  if (claudeClassifier) return claudeClassifier;
+  const pf = await preflight();
+  if (!pf.ok) {
+    alertCliFailure("scan-corrections preflight", pf.detail, log);
+    return null;
+  }
+  claudeClassifier = createClassifier({ corrections: loadCorrections().corrections || [], log });
+  return claudeClassifier;
+}
 
 // High-variance corrections cap (for few-shot learning)
 const MAX_HIGH_VARIANCE_CORRECTIONS = 50;
@@ -404,31 +418,17 @@ async function main() {
         extractByRules(emailData)
       );
 
-      // Use Ollama if still missing company or jobTitle
+      // Use Claude (stage-2 extraction) if still missing company or jobTitle
       if (needsLLMFallback(extracted)) {
-        try {
-          const prompt = buildExtractionPrompt(emailData);
-          const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              model: OLLAMA_EXTRACTION_MODEL,
-              prompt,
-              stream: false,
-              format: "json",
-              options: { temperature: 0.1, num_predict: 200 },
-            }),
-          });
-          if (response.ok) {
-            const data = await response.json();
-            const llmExtracted = parseLLMResponse(data.response);
-            if (llmExtracted) {
-              extracted = mergeExtractedData(extracted, llmExtracted);
-            }
+        const extractor = await getClaudeExtractor();
+        if (extractor) {
+          const llm = await extractor.extract(emailData, { label: messageId });
+          if (llm) {
+            extracted = mergeExtractedData(extracted, llm.extractedData || {});
           }
-        } catch (e) {
-          // Ollama unavailable, continue with rule-based extraction
         }
+        // On failure, continue with rule-based extraction; the import still
+        // carries the user's corrected type and can be completed in the UI.
       }
 
       const importData = {
@@ -444,6 +444,8 @@ async function main() {
         confidence: 1.0, // User-corrected = 100% confidence
         isOutbound: emailData.isOutbound,
         extractedData: extracted,
+        reviewRequired: false,
+        classifier: "user-correction",
       };
       newImportsList.push(importData);
       log(`Promoting from "other": "${emailData.subject.substring(0, 40)}..." -> ${correctedType}`);

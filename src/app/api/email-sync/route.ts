@@ -1,12 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/db";
-import {
-  queryNewEmails,
-  markEmailProcessed,
-  isNotmuchAvailable,
-} from "@/lib/email/notmuch";
-import { parseEmailFile } from "@/lib/email/parser";
-import { classifyEmail, isJobRelated, meetsConfidenceThreshold } from "@/lib/email/classifier";
 
 const API_KEY = process.env.EMAIL_SYNC_API_KEY;
 const MONITORED_EMAILS = (
@@ -20,7 +13,8 @@ interface SyncResult {
 }
 
 /**
- * Pre-classified email import format (sent from local machine with Ollama)
+ * Pre-classified email import format (sent from the local machine, which runs
+ * the two-stage Claude classifier in scripts/jobsync-local-sync.js)
  */
 interface PreClassifiedImport {
   messageId: string;
@@ -47,14 +41,10 @@ interface PreClassifiedImport {
 /**
  * POST /api/email-sync
  *
- * Two modes:
- * 1. Pre-classified mode: Body contains { imports: PreClassifiedImport[] }
- *    - Used when local machine runs Ollama and sends classified data
- *    - Server just stores the data, no notmuch/Ollama needed
- *
- * 2. Local mode: Empty body or { mode: "local" }
- *    - Server queries notmuch and runs Ollama locally
- *    - Requires notmuch and Ollama on server
+ * Body: { imports: PreClassifiedImport[] } — classification happens on the
+ * local machine; the server only stores (and, when confident, files) the data.
+ * The old "local mode" (server-side notmuch + Ollama) was removed: the VPS
+ * never had notmuch, and Ollama is gone.
  *
  * Protected by API key (not user auth since called by shell script).
  */
@@ -82,23 +72,24 @@ export const POST = async (req: NextRequest) => {
     }
 
     // Parse request body
-    let body: { imports?: PreClassifiedImport[]; mode?: string } = {};
+    let body: { imports?: PreClassifiedImport[] } = {};
     try {
       const text = await req.text();
       if (text) {
         body = JSON.parse(text);
       }
     } catch {
-      // Empty body is valid (local mode)
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    // Check if pre-classified imports are provided
-    if (body.imports && Array.isArray(body.imports) && body.imports.length > 0) {
-      return handlePreClassifiedImports(user.id, body.imports);
+    if (!body.imports || !Array.isArray(body.imports) || body.imports.length === 0) {
+      return NextResponse.json(
+        { error: "Expected { imports: [...] } — server-side classification was removed" },
+        { status: 400 }
+      );
     }
 
-    // Fall back to local mode (query notmuch, run Ollama)
-    return handleLocalMode(user.id);
+    return handlePreClassifiedImports(user.id, body.imports);
   } catch (error) {
     console.error("Email sync error:", error);
     return NextResponse.json(
@@ -202,134 +193,6 @@ async function handlePreClassifiedImports(
   return NextResponse.json({
     message: "Pre-classified import completed",
     mode: "pre-classified",
-    ...result,
-    errors: result.errors.length > 0 ? result.errors : undefined,
-  });
-}
-
-/**
- * Handle local mode (server queries notmuch and runs Ollama)
- */
-async function handleLocalMode(userId: string): Promise<NextResponse> {
-  // Check if notmuch is available
-  const notmuchAvailable = await isNotmuchAvailable();
-  if (!notmuchAvailable) {
-    return NextResponse.json(
-      { error: "notmuch is not installed or not accessible" },
-      { status: 500 }
-    );
-  }
-
-  // Ensure email accounts exist for monitored emails
-  for (const email of MONITORED_EMAILS) {
-    await prisma.emailAccount.upsert({
-      where: { email },
-      update: {},
-      create: {
-        userId,
-        email,
-        isActive: true,
-      },
-    });
-  }
-
-  // Query notmuch for new emails
-  const emailPaths = await queryNewEmails();
-
-  if (emailPaths.length === 0) {
-    return NextResponse.json({
-      message: "No new job-related emails",
-      mode: "local",
-      processed: 0,
-      skipped: 0,
-    });
-  }
-
-  const result: SyncResult = {
-    processed: 0,
-    skipped: 0,
-    errors: [],
-  };
-
-  // Process each email
-  for (const filePath of emailPaths) {
-    try {
-      // Parse the email
-      const parsed = await parseEmailFile(filePath);
-
-      // Check for duplicate by message ID
-      const existing = await prisma.emailImport.findUnique({
-        where: { messageId: parsed.messageId },
-      });
-
-      if (existing) {
-        result.skipped++;
-        continue;
-      }
-
-      // Classify the email with LLM
-      const classification = await classifyEmail(parsed);
-
-      // Skip non-job-related emails or low confidence
-      if (
-        !isJobRelated(classification) ||
-        !meetsConfidenceThreshold(classification)
-      ) {
-        // Mark as processed in notmuch to avoid re-processing
-        await markEmailProcessed(parsed.messageId);
-        result.skipped++;
-        continue;
-      }
-
-      // Find the email account
-      const emailAccount = await prisma.emailAccount.findFirst({
-        where: {
-          email: {
-            in: MONITORED_EMAILS,
-          },
-          isActive: true,
-        },
-      });
-
-      if (!emailAccount) {
-        result.skipped++;
-        continue;
-      }
-
-      // Store in queue for review
-      await prisma.emailImport.create({
-        data: {
-          userId,
-          emailAccountId: emailAccount.id,
-          messageId: parsed.messageId,
-          subject: parsed.subject,
-          fromEmail: parsed.from,
-          fromName: parsed.fromName,
-          toEmail: parsed.to,
-          emailDate: parsed.date,
-          bodyText: parsed.textBody?.substring(0, 10000) || null,
-          bodyHtml: parsed.htmlBody?.substring(0, 50000) || null,
-          classification: classification.type,
-          confidence: classification.confidence,
-          isOutbound: parsed.isOutbound,
-          extractedData: JSON.stringify(classification.extractedData),
-          status: "pending",
-        },
-      });
-
-      // Mark as processed in notmuch
-      await markEmailProcessed(parsed.messageId);
-      result.processed++;
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Unknown error";
-      result.errors.push(`Error processing ${filePath}: ${errorMessage}`);
-    }
-  }
-
-  return NextResponse.json({
-    message: "Email sync completed",
-    mode: "local",
     ...result,
     errors: result.errors.length > 0 ? result.errors : undefined,
   });

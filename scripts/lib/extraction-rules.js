@@ -155,7 +155,10 @@ function detectJobType(text) {
 
   for (const [type, patterns] of Object.entries(JOB_TYPES)) {
     for (const pattern of patterns) {
-      if (lowerText.includes(pattern)) {
+      // Whole-word match: a bare substring test made "ft" match "software"
+      // and "pt" match "prompt", tagging almost everything full-time.
+      const re = new RegExp(`\\b${pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+      if (re.test(lowerText)) {
         return type;
       }
     }

@@ -3,7 +3,7 @@
  * Backfill Email Import Metadata
  *
  * Finds email imports missing company/jobTitle and extracts metadata
- * using regex patterns and LLM fallback.
+ * using regex patterns and a Claude (headless CLI) fallback.
  *
  * Usage:
  *   node scripts/jobsync-backfill-metadata.js [--dry-run] [--limit=N] [--llm]
@@ -22,12 +22,11 @@ const fs = require("fs");
 const path = require("path");
 const {
   extractByRules,
-  buildExtractionPrompt,
-  parseLLMResponse,
   mergeExtractedData,
   needsLLMFallback,
 } = require("./lib/extraction-rules");
 const { htmlToText } = require("./lib/classification-rules");
+const { createClassifier, preflight, alertCliFailure } = require("./lib/claude-classifier");
 
 const execAsync = promisify(exec);
 
@@ -35,8 +34,6 @@ const execAsync = promisify(exec);
 const JOBSYNC_API_URL =
   process.env.JOBSYNC_API_URL || "http://localhost:3000/api/email-sync";
 const JOBSYNC_API_KEY = process.env.JOBSYNC_API_KEY || "";
-const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
 
 // Parse arguments
 const DRY_RUN = process.argv.includes("--dry-run");
@@ -134,36 +131,24 @@ async function parseEmailFile(filePath) {
 }
 
 /**
- * Call Ollama for LLM extraction
+ * Claude (headless CLI, stage-2 extraction) for LLM extraction.
+ * Created lazily after an auth preflight; null if the CLI is unusable.
  */
+let claudeClassifier = null;
+let claudeUnavailable = false;
 async function extractWithLLM(email) {
-  const prompt = buildExtractionPrompt(email);
-
-  try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        prompt,
-        stream: false,
-        options: {
-          temperature: 0.1,
-          num_predict: 200,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Ollama error: ${response.status}`);
+  if (claudeUnavailable) return null;
+  if (!claudeClassifier) {
+    const pf = await preflight();
+    if (!pf.ok) {
+      claudeUnavailable = true;
+      alertCliFailure("backfill-metadata preflight", pf.detail, log);
+      return null;
     }
-
-    const data = await response.json();
-    return parseLLMResponse(data.response);
-  } catch (error) {
-    log(`LLM extraction failed: ${error.message}`);
-    return null;
+    claudeClassifier = createClassifier({ log });
   }
+  const result = await claudeClassifier.extract(email);
+  return result ? result.extractedData : null;
 }
 
 /**

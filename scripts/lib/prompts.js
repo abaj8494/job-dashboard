@@ -1,190 +1,185 @@
 /**
- * Shared Classification Prompts
+ * Claude Classification Prompts
  *
- * Single source of truth for Ollama classification prompts used by
- * local-sync, reclassify-untagged, and scan-corrections scripts.
+ * Single source of truth for the two-stage email classifier used by
+ * jobsync-local-sync, jobsync-reclassify-untagged, jobsync-scan-corrections,
+ * jobsync-backfill-metadata and the eval harness.
  *
- * NOTE: Server equivalent at src/lib/ai/prompts/email-classification/system.ts
- * Keep both in sync when making prompt changes.
+ * Stage 1 sees metadata only (from, to, subject, date, a short snippet) and
+ * must decide whether it is confident. Stage 2 sees the full body and also
+ * extracts company / jobTitle / location etc.
+ *
+ * The system prompt is frozen text plus a deterministic corrections block so
+ * behaviour is reproducible run to run. Per-email content goes in the user
+ * prompt only.
  */
 
-const CLASSIFICATION_SYSTEM_PROMPT = `You are an expert email classifier specialized in job search and recruitment communications. Your task is to analyze emails and determine if they are job-related, and if so, extract relevant information.
+const { z } = require("zod");
+const { CLASSIFICATION_TYPES } = require("./classification-rules");
 
-## CLASSIFICATION CATEGORIES
+const SNIPPET_CHARS = 300;
+const STAGE2_BODY_CHARS = 8000;
+const MAX_CORRECTION_EXAMPLES = 50;
 
-1. **job_application** - Application submission or confirmation
-   - Outbound: Cover letters, application submissions sent by the user
-   - Inbound: Application confirmation emails from job boards (SEEK, Indeed, LinkedIn, etc.)
-   - Look for: "I am applying", "please find my resume", "interested in the position"
-   - Look for: "application was successfully submitted", "you applied to", "application sent"
-   - Key distinction: These are about the ACT of applying, not a response FROM the company
+const CLASSIFICATION_SYSTEM_PROMPT = `You classify emails for a personal job-application tracker. The owner of the mailbox is the job seeker. Decide whether each email is part of the owner's job search and, if so, which stage it represents.
 
-2. **job_response** - Response from the HIRING COMPANY acknowledging application
-   - Application received confirmations, "we'll be in touch" messages
-   - Look for: "thank you for applying", "application received", "we have received your"
+## Categories (use exactly one)
 
-3. **interview** - Interview invitation or scheduling
-   - Phone screen, video call, on-site interview scheduling
-   - Look for: "schedule an interview", "availability", "interview invitation", "next steps"
+- job_application — The ACT of applying. Either (a) outbound: the owner sends an application, cover letter or resume to a company, or (b) inbound: a job board (SEEK, LinkedIn, Indeed, Jora, GradConnection, Prosple, etc.) confirms that the owner's application was SUBMITTED. Phrases: "your application was successfully submitted", "you applied to", "application sent", "I am applying for".
+- job_response — The HIRING COMPANY (or its ATS: Greenhouse, Lever, Workday, iCIMS, SmartRecruiters, Ashby, Jobvite, Taleo, BambooHR, Breezy) acknowledges or receives the application. Phrases: "thank you for applying", "we have received your application", "your application has been received", "we'll be in touch", "we are reviewing your application". IMPORTANT: "we have received your application" is job_response, NOT job_application — it is a response FROM the company, not the act of applying.
+- interview — Invitation to, or scheduling of, a phone screen, video call, assessment centre, technical test with a live session, or on-site interview. Phrases: "schedule an interview", "your availability", "role alignment discussion", "next steps: interview", calendar invites for interviews.
+- rejection — The application is declined or the position is filled. Phrases: "unfortunately", "we will not be moving forward", "decided not to proceed", "position has been filled", "other candidates".
+- offer — A job offer or compensation negotiation. Phrases: "pleased to offer", "offer letter", "salary", "compensation package", "contract for signature".
+- follow_up — Status updates or requests on an existing application that are none of the above: "checking in", "update on your application", requests for additional documents, reference checks, background checks, onboarding paperwork before an offer is accepted.
+- other — Not part of the owner's job search: job alerts and digests ("jobs matching your search", "recommended for you"), recruiter marketing and newsletters, career advice, job-board account notices, event invitations that are not interviews, receipts, personal mail, anything else. Default when the email is not clearly one of the categories above.
 
-4. **rejection** - Application rejection or "position filled" notification
-   - Declinations, "not moving forward" messages
-   - Look for: "unfortunately", "decided not to proceed", "position has been filled", "other candidates"
+## Hard rules
 
-5. **offer** - Job offer or salary negotiation
-   - Formal offers, compensation discussions
-   - Look for: "pleased to offer", "offer letter", "salary", "compensation package"
+1. Job ALERTS and job RECOMMENDATIONS are "other", even from SEEK/LinkedIn/Indeed. Only a confirmation of an application the owner actually submitted is job_application.
+2. Personal mail is "other" even when it mentions jobs (a friend venting about job hunting is not an application). Casual tone, personal addresses on both ends, or social content → other.
+3. Automated "we received your application" / "thank you for applying" from a company or ATS is job_response.
+4. A job-board "your application was submitted to <Company>" is job_application.
+5. An email asking the owner to complete a timed assessment with no human session is follow_up; an invitation to speak with a person is interview.
+6. Be conservative between job-related categories: if a job-related email does not clearly fit interview/rejection/offer, prefer job_response (first acknowledgement) or follow_up (later update).
 
-6. **follow_up** - Follow-up emails about application status
-   - Status updates, additional document requests
-   - Look for: "checking in", "following up", "update on your application"
+## Confidence
 
-7. **other** - Not job-related
-   - Newsletters, marketing, personal emails, spam, events, etc.
-   - Default classification when uncertain
+Confidence is your probability that the category is correct, from 0 to 1.
+- 0.9–1.0: obvious from the sender and subject alone (job-board confirmations, clear alerts, obvious marketing, obvious personal mail).
+- 0.8–0.9: clear but inferred.
+- below 0.8: genuinely unsure, the snippet is insufficient, or the sender is a company whose message could be a response, follow-up, interview or rejection.
+When you are shown only metadata and a short snippet, do NOT guess between job-related categories: report the lower confidence so the full email is read.
 
-## EXTRACTION GUIDELINES
+## Reason
 
-When the email IS job-related, extract:
-- **company**: The actual company hiring (NOT the ATS provider like Greenhouse, Lever, Workday)
-- **jobTitle**: The specific position title if mentioned
-- **location**: City, state, country, or "Remote" if specified
-- **applicationUrl**: Direct link to job posting or application
-- **recruiterName**: Name of recruiter or hiring manager
-- **interviewDate**: If scheduling an interview, the proposed date/time
-- **deadline**: Application deadline if mentioned
-- **salaryRange**: Salary or compensation range if disclosed
+One short sentence naming the evidence you used (sender, subject phrase, or body phrase).`;
 
-## INDICATORS OF JOB-RELATED EMAILS
+const STAGE1_INSTRUCTIONS = `You are seeing ONLY metadata and the first ${SNIPPET_CHARS} characters of the email. Classify it and report how confident you are. If the metadata is enough to be sure (clearly unrelated, a clear job alert, a clear job-board submission confirmation), say so with high confidence. If the email is from a company or recruiter and the stage is unclear, use a confidence below 0.8.`;
 
-**Sender domains (ATS/Recruiters - typically job_response):**
-- greenhouse.io, lever.co, workday.com, myworkday.com
-- icims.com, smartrecruiters.com, ashbyhq.com
-- jobvite.com, taleo.net, breezy.hr, bamboohr.com
-
-**Job board confirmation emails (classify as job_application, NOT job_response):**
-- seek.com.au, seek.com - "Your application was successfully submitted"
-- linkedin.com - "You applied to..."
-- indeed.com - "Your application was sent"
-- glassdoor.com - Application confirmations
-
-**Keywords:**
-- "application", "applied", "position", "role", "opportunity"
-- "interview", "candidate", "resume", "CV"
-- "hiring", "recruiter", "talent acquisition"
-
-## INDICATORS OF NON-JOB EMAILS (classify as "other")
-
-- Marketing/newsletters (unsubscribe links, promotional content)
-- Account notifications (password reset, login alerts, security)
-- Order confirmations, receipts, shipping updates
-- Personal correspondence
-- Event invitations not related to job interviews
-- Career advice content, job search tips (not actual applications)
-
-## CRITICAL: PERSONAL EMAILS ARE NOT JOB-RELATED
-
-Personal emails must be classified as "other" even if they mention jobs:
-
-**Check these FIRST before classifying as job-related:**
-1. Is this TO a personal email domain (gmail, outlook, yahoo) with casual content? -> "other"
-2. Is this outbound from user to a friend/family member? -> "other"
-3. Does it use casual language (hey, yo, sup, check this out, lol)? -> "other"
-4. Is someone venting about job searching to a friend? -> "other" (NOT a job application!)
-
-**Personal email indicators:**
-- TO field contains personal domains (gmail.com, outlook.com, etc.) AND casual subject
-- Casual language: "hey", "yo", "check this out", "lol", "haha"
-- Social content: sharing links, making plans, chatting
-- Outbound emails to non-company addresses about casual topics
-
-**The KEY distinction:**
-- Job emails come FROM companies/recruiters/job-boards TO the user
-- Job emails sent BY the user go TO companies/careers@ addresses
-- Personal emails to friends about job frustrations are NOT applications
-
-## EXTRACTION PATTERNS
-
-**For SEEK:** "Your application for [JOB_TITLE] was successfully submitted to [COMPANY]"
-**For LinkedIn:** "You applied for [JOB_TITLE] at [COMPANY]" or "Your application was sent to [COMPANY]"
-**For Indeed:** Look for job title and company in the confirmation body
-**For Workday/ATS:** Look for "role of [JOB_TITLE]" or "position of [JOB_TITLE]", company often in sender
-
-## FEW-SHOT EXAMPLES
-
-**Example 1 - SEEK Confirmation (job_application):**
-From: applications@seek.com.au
-Subject: Your application was successfully submitted
-Body: "Your application for Senior Software Engineer was successfully submitted to Canva."
--> Classification: job_application, confidence: 0.95
--> Extract: company="Canva", jobTitle="Senior Software Engineer", source="SEEK"
-
-**Example 2 - Personal Email (other):**
-From: user@gmail.com
-To: friend@gmail.com
-Subject: job hunting sucks
-Body: "hey man, this job search is killing me..."
--> Classification: other, confidence: 0.95
--> Reason: Personal email to friend about job frustrations, NOT an actual application
-
-**Example 3 - Company Response (job_response):**
-From: careers@bigtech.com
-Subject: Thank you for applying
-Body: "Thank you for your interest in the Software Engineer position..."
--> Classification: job_response, confidence: 0.9
--> Extract: company="BigTech", jobTitle="Software Engineer"
-
-## OUTPUT REQUIREMENTS
-
-- Be CONSERVATIVE: if uncertain, classify as "other" with low confidence
-- Only extract data that is EXPLICITLY stated in the email
-- For company name, look past the ATS - find the actual employer
-- Confidence should reflect certainty: 0.9+ for clear cases, 0.5-0.7 for ambiguous
-- Brief reasoning helps verify the classification logic
-
-Respond ONLY with valid JSON. The "type" field MUST be one of: job_application, job_response, interview, rejection, offer, follow_up, other.
-{"type":"other","confidence":0.95,"reasoning":"brief explanation","extractedData":{"company":"Name or null","jobTitle":"Title or null","location":"City or null","applicationUrl":"url or null","recruiterName":"Name or null","salaryRange":"range or null","source":"SEEK/LinkedIn/etc or null"}}`;
+const STAGE2_INSTRUCTIONS = `You are seeing the full email. Classify it, and if it is job-related extract the details. For extraction:
+- company: the actual employer, never the job board or ATS vendor. null if not stated.
+- jobTitle: the specific position title as written. null if not stated.
+- location: city/state/country or "Remote". null if not stated.
+- applicationUrl: a direct link to the job posting or application, if present.
+- recruiterName: the named recruiter or hiring contact, if any.
+- salaryRange: salary or compensation range if disclosed.
+- source: the job board or ATS the email came through (SEEK, LinkedIn, Indeed, Greenhouse, Workday, ...), or null.
+- jobType: one of full-time, part-time, contract, casual, temporary, internship, graduate, or null.
+Only extract what the email explicitly states. Use null otherwise. If the email is "other", every extraction field is null.`;
 
 /**
- * Build few-shot examples from recent corrections
+ * Deterministic corrections block appended to the system prompt.
+ * One compact line per correction so 50 corrections stay ~2k tokens.
  */
-function buildFewShotExamples(corrections, maxExamples = 5) {
-  if (!corrections || corrections.length === 0) return "";
+function buildCorrectionsBlock(corrections, maxExamples = MAX_CORRECTION_EXAMPLES) {
+  if (!Array.isArray(corrections) || corrections.length === 0) return "";
 
   const recent = corrections.slice(-maxExamples);
+  const lines = recent.map((c) => {
+    const subject = String(c.subject || "(No subject)").replace(/\s+/g, " ").substring(0, 120);
+    const from = String(c.fromName ? `${c.fromName} <${c.from}>` : c.from || "").replace(/\s+/g, " ").substring(0, 80);
+    const direction = c.isOutbound ? "SENT" : "RECEIVED";
+    return `- was ${c.originalType}, correct is ${c.correctedType} | ${direction} | From: ${from} | Subject: ${subject}`;
+  });
 
-  const examples = recent.map((c, i) => {
-    return `Example ${i + 1} (CORRECTED - was "${c.originalType}", should be "${c.correctedType}"):
-Subject: ${c.subject}
-From: ${c.from}
-Direction: ${c.isOutbound ? "SENT" : "RECEIVED"}
-Body preview: ${(c.bodyPreview || "").substring(0, 500)}
-CORRECT classification: ${c.correctedType}`;
-  }).join("\n\n");
-
-  return `\n\nHere are some examples of previous corrections to learn from:\n${examples}\n\nNow classify the following email:`;
+  return `\n\n## Owner corrections (ground truth from past mistakes; apply the same judgement to similar mail)\n${lines.join("\n")}`;
 }
 
-/**
- * Build the user prompt for classification
- */
-function buildClassificationUserPrompt(email, corrections = []) {
-  const fewShotExamples = buildFewShotExamples(corrections);
+function buildSystemPrompt(corrections = []) {
+  return CLASSIFICATION_SYSTEM_PROMPT + buildCorrectionsBlock(corrections);
+}
 
-  return `${fewShotExamples}
+function cleanLine(value, max = 200) {
+  return String(value || "").replace(/\s+/g, " ").trim().substring(0, max);
+}
 
-Direction: ${email.isOutbound ? "SENT" : "RECEIVED"}
-From: ${email.fromName || email.from}
-To: ${email.to}
-Subject: ${email.subject}
-Date: ${email.date.toISOString()}
+function snippetOf(email, chars = SNIPPET_CHARS) {
+  const text = String(email.textBody || email.bodyText || "").replace(/\s+/g, " ").trim();
+  return text.substring(0, chars);
+}
+
+function headerBlock(email) {
+  const date = email.date instanceof Date ? email.date.toISOString() : String(email.date || "");
+  const from = email.fromName ? `${cleanLine(email.fromName, 80)} <${cleanLine(email.from || email.fromEmail, 120)}>` : cleanLine(email.from || email.fromEmail, 120);
+  return [
+    `Direction: ${email.isOutbound ? "SENT by the owner" : "RECEIVED by the owner"}`,
+    `From: ${from}`,
+    `To: ${cleanLine(email.to || email.toEmail, 120)}`,
+    `Subject: ${cleanLine(email.subject, 200)}`,
+    `Date: ${date}`,
+  ].join("\n");
+}
+
+function buildStage1Prompt(email) {
+  return `${STAGE1_INSTRUCTIONS}
+
+${headerBlock(email)}
+Snippet: ${snippetOf(email) || "(no text body)"}`;
+}
+
+function buildStage2Prompt(email) {
+  const body = String(email.textBody || email.bodyText || "").trim().substring(0, STAGE2_BODY_CHARS);
+  return `${STAGE2_INSTRUCTIONS}
+
+${headerBlock(email)}
 
 Body:
-${(email.textBody || "(No text body)").substring(0, 3000)}`;
+${body || "(no text body)"}`;
 }
+
+// ---------------------------------------------------------------------------
+// Structured output schemas (zod for validation, JSON Schema for --json-schema)
+// ---------------------------------------------------------------------------
+
+const CategorySchema = z.enum(CLASSIFICATION_TYPES);
+
+const Stage1Schema = z.object({
+  category: CategorySchema,
+  confidence: z.number().min(0).max(1),
+  reason: z.string(),
+});
+
+const ExtractedDataSchema = z.object({
+  company: z.string().nullable(),
+  jobTitle: z.string().nullable(),
+  location: z.string().nullable(),
+  applicationUrl: z.string().nullable(),
+  recruiterName: z.string().nullable(),
+  salaryRange: z.string().nullable(),
+  source: z.string().nullable(),
+  jobType: z.string().nullable(),
+});
+
+const Stage2Schema = z.object({
+  category: CategorySchema,
+  confidence: z.number().min(0).max(1),
+  reason: z.string(),
+  extractedData: ExtractedDataSchema,
+});
+
+// The claude CLI's --json-schema validator rejects the "$schema" key zod emits.
+function toCliJsonSchema(schema) {
+  const { $schema, ...rest } = z.toJSONSchema(schema);
+  return rest;
+}
+
+const STAGE1_JSON_SCHEMA = toCliJsonSchema(Stage1Schema);
+const STAGE2_JSON_SCHEMA = toCliJsonSchema(Stage2Schema);
 
 module.exports = {
   CLASSIFICATION_SYSTEM_PROMPT,
-  buildClassificationUserPrompt,
-  buildFewShotExamples,
+  STAGE1_INSTRUCTIONS,
+  STAGE2_INSTRUCTIONS,
+  SNIPPET_CHARS,
+  STAGE2_BODY_CHARS,
+  buildCorrectionsBlock,
+  buildSystemPrompt,
+  buildStage1Prompt,
+  buildStage2Prompt,
+  snippetOf,
+  Stage1Schema,
+  Stage2Schema,
+  ExtractedDataSchema,
+  STAGE1_JSON_SCHEMA,
+  STAGE2_JSON_SCHEMA,
 };

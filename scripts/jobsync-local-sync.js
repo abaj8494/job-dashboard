@@ -2,11 +2,21 @@
 /**
  * Local Email Sync Script
  *
- * Runs locally with Ollama to classify emails, then sends
- * pre-classified data to the remote JobSync server.
+ * Runs on the Mac from the notmuch post-new hook. Finds `tag:new` mail to the
+ * monitored addresses, classifies it with the two-stage Claude classifier
+ * (headless Claude Code CLI, see scripts/lib/claude-classifier.js), tags the
+ * message `jobsync/<type>`, and POSTs job-related imports to the JobSync
+ * server, which auto-files the confident ones.
  *
  * Usage:
- *   node scripts/jobsync-local-sync.js
+ *   node scripts/jobsync-local-sync.js [--dry-run] [--limit N]
+ *
+ *   --dry-run   classify and print, but do not tag or send
+ *   --limit N   only process the first N messages
+ *
+ * Failure semantics: if the claude CLI preflight fails, or a classification
+ * fails, the mail is left untagged (still tag:new) so the next hook run
+ * retries. Nothing is tagged or sent on a failed classification.
  */
 
 const { exec } = require("child_process");
@@ -15,29 +25,31 @@ const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
 const { CLASSIFICATION_TYPES, classifyByRules, htmlToText } = require("./lib/classification-rules");
-const { extractByRules, mergeExtractedData, needsLLMFallback, buildExtractionPrompt, parseLLMResponse } = require("./lib/extraction-rules");
-const { CLASSIFICATION_SYSTEM_PROMPT, buildClassificationUserPrompt } = require("./lib/prompts");
+const { createClassifier, preflight, alertCliFailure } = require("./lib/claude-classifier");
 
 const execAsync = promisify(exec);
+
+// CLI flags
+const DRY_RUN = process.argv.includes("--dry-run");
+const LIMIT = (() => {
+  const idx = process.argv.indexOf("--limit");
+  return idx !== -1 && process.argv[idx + 1] ? parseInt(process.argv[idx + 1], 10) : 0;
+})();
 
 // Configuration from environment
 const JOBSYNC_API_URL =
   process.env.JOBSYNC_API_URL || "http://localhost:3000/api/email-sync";
 const JOBSYNC_API_KEY = process.env.JOBSYNC_API_KEY || "";
-const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
-const OLLAMA_EXTRACTION_MODEL = process.env.OLLAMA_EXTRACTION_MODEL || "qwen2.5:14b";
 const MONITORED_EMAILS = (
   process.env.MONITORED_EMAILS || "j@abaj.ai,aayushbajaj7@gmail.com"
 ).split(",");
-const CONCURRENCY = parseInt(process.env.JOBSYNC_CONCURRENCY || "4", 10);
+// The CLI has a few seconds of startup per call; keep concurrency low.
+const CONCURRENCY = parseInt(process.env.JOBSYNC_CONCURRENCY || "2", 10);
 
 const JOBSYNC_DIR = path.join(process.env.HOME || "~", ".jobsync");
 const LOG_FILE = path.join(JOBSYNC_DIR, "local-sync.log");
 const CORRECTIONS_FILE = path.join(JOBSYNC_DIR, "corrections.json");
 const IS_TTY = process.stdout.isTTY;
-
-// CLASSIFICATION_TYPES, classifyByRules, htmlToText imported from ./lib/classification-rules.js
 
 function log(message) {
   const timestamp = new Date().toISOString();
@@ -53,21 +65,6 @@ function log(message) {
   // Only write to console if running interactively
   if (IS_TTY) {
     console.log(logMessage);
-  }
-}
-
-function progressBar(current, total, width = 30) {
-  const percent = total > 0 ? current / total : 0;
-  const filled = Math.round(width * percent);
-  const empty = width - filled;
-  const bar = "█".repeat(filled) + "░".repeat(empty);
-  return `[${bar}] ${current}/${total} (${(percent * 100).toFixed(0)}%)`;
-}
-
-function updateProgress(current, total, message = "") {
-  if (IS_TTY) {
-    // Clear line and show progress
-    process.stdout.write(`\r${progressBar(current, total)} ${message}`.padEnd(100));
   }
 }
 
@@ -87,23 +84,11 @@ function loadCorrections() {
 }
 
 /**
- * Save corrections to file
- */
-function saveCorrections(data) {
-  try {
-    fs.writeFileSync(CORRECTIONS_FILE, JSON.stringify(data, null, 2));
-  } catch (e) {
-    log(`Failed to save corrections: ${e.message}`);
-  }
-}
-
-/**
  * Run async tasks with limited concurrency
  */
 async function runWithConcurrency(items, fn, concurrency) {
   const results = [];
   let index = 0;
-  let completed = 0;
 
   async function worker() {
     while (index < items.length) {
@@ -115,11 +100,9 @@ async function runWithConcurrency(items, fn, concurrency) {
       } catch (error) {
         results[currentIndex] = { error };
       }
-      completed++;
     }
   }
 
-  // Start workers
   const workers = [];
   for (let i = 0; i < Math.min(concurrency, items.length); i++) {
     workers.push(worker());
@@ -203,44 +186,8 @@ async function parseEmailFile(filePath) {
   }
 }
 
-async function classifyWithOllama(email, corrections = []) {
-  const userPrompt = buildClassificationUserPrompt(email, corrections);
-
-  try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        prompt: `${CLASSIFICATION_SYSTEM_PROMPT}\n\n${userPrompt}`,
-        stream: false,
-        format: "json",
-        options: {
-          temperature: 0.1,
-          num_predict: 400,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Ollama request failed: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const result = JSON.parse(data.response);
-
-    return {
-      type: CLASSIFICATION_TYPES.includes(result.type) ? result.type : "other",
-      confidence: result.confidence || 0.5,
-      extractedData: result.extractedData || {},
-    };
-  } catch (error) {
-    log(`Ollama classification failed: ${error.message}`);
-    return null;
-  }
-}
-
 async function markEmailProcessed(messageId, classificationType = null) {
+  if (DRY_RUN) return;
   try {
     // Strip angle brackets if present (mailparser includes them, notmuch doesn't want them)
     const cleanId = messageId.replace(/^<|>$/g, "");
@@ -263,48 +210,11 @@ function isJobRelated(classification) {
   return classification.type !== "other";
 }
 
-/**
- * Extract metadata using rules, with optional LLM fallback
- */
-async function extractMetadata(email, useLLMFallback = true) {
-  // First try rule-based extraction
-  let extracted = extractByRules(email);
-
-  // If missing critical fields and LLM fallback is enabled, use Ollama
-  if (useLLMFallback && needsLLMFallback(extracted)) {
-    const prompt = buildExtractionPrompt(email);
-    try {
-      const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: OLLAMA_EXTRACTION_MODEL,
-          prompt,
-          stream: false,
-          format: "json",
-          options: {
-            temperature: 0.1,
-            num_predict: 200,
-          },
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        const llmExtracted = parseLLMResponse(data.response);
-        if (llmExtracted) {
-          extracted = mergeExtractedData(extracted, llmExtracted);
-        }
-      }
-    } catch (error) {
-      // LLM extraction failed, continue with rule-based results
-    }
-  }
-
-  return extracted;
-}
-
 async function sendToServer(imports) {
+  if (DRY_RUN) {
+    log(`[dry-run] would send ${imports.length} imports to ${JOBSYNC_API_URL}`);
+    return true;
+  }
   try {
     const response = await fetch(JOBSYNC_API_URL, {
       method: "POST",
@@ -345,68 +255,100 @@ async function sendToServer(imports) {
   }
 }
 
-async function processOneEmail(filePath, index, total, corrections = []) {
+/**
+ * Build the import payload the server stores. `reviewRequired` tells the
+ * server whether to auto-file (false) or leave the import pending (true).
+ */
+function buildImportPayload(parsed, classification) {
+  return {
+    messageId: parsed.messageId,
+    subject: parsed.subject,
+    fromEmail: parsed.from,
+    fromName: parsed.fromName,
+    toEmail: parsed.to,
+    emailDate: parsed.date.toISOString(),
+    bodyText: (parsed.textBody || "").substring(0, 10000),
+    bodyHtml: (parsed.htmlBody || "").substring(0, 50000),
+    classification: classification.type,
+    confidence: classification.confidence,
+    isOutbound: parsed.isOutbound,
+    extractedData: classification.extractedData || {},
+    reviewRequired: !!classification.reviewRequired,
+    classifier: classification.source,
+    classificationStage: classification.stage || null,
+    classificationReason: classification.reason || null,
+  };
+}
+
+async function processOneEmail(filePath, index, total, classifier) {
   const parsed = await parseEmailFile(filePath);
   if (!parsed) {
     return { status: "parse_failed" };
   }
 
   const shortSubject = parsed.subject.substring(0, 40).replace(/\n/g, " ");
+  const tag = `[${index + 1}/${total}]`;
 
   // Try rule-based classification first (fast, no LLM needed)
   let classification = classifyByRules(parsed);
-  let classificationSource = "rules";
 
   if (classification) {
-    log(`[${index + 1}/${total}] [FAST-PATH:${classification.reason}] ${shortSubject} -> ${classification.type}`);
+    classification = {
+      ...classification,
+      source: "rules",
+      stage: 0,
+      reviewRequired: false,
+      extractedData: classification.extractedData || {},
+    };
+    log(`${tag} [FAST-PATH:${classification.reason}] ${shortSubject} -> ${classification.type}`);
   } else {
-    // Fall back to Ollama for complex cases
-    log(`[${index + 1}/${total}] [LLM] Classifying: ${shortSubject}...`);
-    classification = await classifyWithOllama(parsed, corrections);
-    classificationSource = "ollama";
+    log(`${tag} [CLAUDE] Classifying: ${shortSubject}...`);
+    const result = await classifier.classify(parsed);
 
-    if (!classification) {
-      log(`[${index + 1}/${total}]   -> Classification failed, will retry later`);
+    if (!result) {
+      log(`${tag}   -> Classification failed, left untagged for retry`);
       return { status: "classify_failed" };
     }
 
-    log(`[${index + 1}/${total}]   -> ${classification.type} (${(classification.confidence * 100).toFixed(0)}%)`);
+    classification = { ...result, source: "claude" };
+    log(
+      `${tag}   -> ${result.type} (${(result.confidence * 100).toFixed(0)}%, stage ${result.stage}` +
+        `${result.reviewRequired ? ", REVIEW" : ""}, $${result.cost.toFixed(4)}) ${result.reason}`
+    );
   }
 
-  if (!isJobRelated(classification) || classification.confidence < 0.6) {
+  if (DRY_RUN) {
+    console.log(
+      JSON.stringify({
+        subject: parsed.subject,
+        from: parsed.from,
+        type: classification.type,
+        confidence: classification.confidence,
+        stage: classification.stage,
+        reviewRequired: classification.reviewRequired,
+        reason: classification.reason,
+        extractedData: classification.extractedData,
+      })
+    );
+  }
+
+  // Confident "other": tag and move on, never imported.
+  if (!isJobRelated(classification) && !classification.reviewRequired) {
     await markEmailProcessed(parsed.messageId, classification.type);
-    return { status: "skipped", reason: "not job-related", source: classificationSource };
+    return { status: "skipped", reason: "not job-related", source: classification.source };
   }
 
-  // Extract comprehensive metadata using rules + LLM fallback
-  const ruleExtracted = await extractMetadata(parsed, true);
-
-  // Merge with any LLM-extracted data from classification (prefer rule-based)
-  const extractedData = mergeExtractedData(
-    classification.extractedData || {},
-    ruleExtracted
-  );
-
-  // NOTE: do NOT tag as processed here. Job-related emails are tagged in main()
-  // only after the server confirms the import, so a failed send leaves them in
-  // the queue to retry instead of orphaning them (tagged locally, absent on prod).
+  // Everything else (job-related at any confidence, or an uncertain "other")
+  // is sent to the server. The server files confident imports itself and
+  // leaves uncertain ones pending for review.
+  //
+  // NOTE: do NOT tag as processed here. These are tagged in main() only after
+  // the server confirms the import, so a failed send leaves them in the queue
+  // to retry instead of orphaning them (tagged locally, absent on prod).
   return {
     status: "job_related",
-    source: classificationSource,
-    data: {
-      messageId: parsed.messageId,
-      subject: parsed.subject,
-      fromEmail: parsed.from,
-      fromName: parsed.fromName,
-      toEmail: parsed.to,
-      emailDate: parsed.date.toISOString(),
-      bodyText: (parsed.textBody || "").substring(0, 10000),
-      bodyHtml: (parsed.htmlBody || "").substring(0, 50000),
-      classification: classification.type,
-      confidence: classification.confidence,
-      isOutbound: parsed.isOutbound,
-      extractedData,
-    },
+    source: classification.source,
+    data: buildImportPayload(parsed, classification),
   };
 }
 
@@ -417,9 +359,9 @@ async function main() {
     fs.mkdirSync(logDir, { recursive: true });
   }
 
-  log("Starting local email sync...");
+  log(`Starting local email sync...${DRY_RUN ? " (DRY RUN)" : ""}`);
 
-  if (!JOBSYNC_API_KEY) {
+  if (!JOBSYNC_API_KEY && !DRY_RUN) {
     log("ERROR: JOBSYNC_API_KEY not set");
     process.exit(1);
   }
@@ -427,27 +369,43 @@ async function main() {
   log(`API URL: ${JOBSYNC_API_URL}`);
   log(`Concurrency: ${CONCURRENCY}`);
 
-  // Load corrections for few-shot learning
-  const correctionsData = loadCorrections();
-  const corrections = correctionsData.corrections || [];
-  if (corrections.length > 0) {
-    log(`Loaded ${corrections.length} corrections for few-shot learning`);
-  }
-
-  // Query for new emails
-  const emailPaths = await queryNewEmails();
+  // Query for new emails first so a preflight failure with nothing to do stays quiet.
+  let emailPaths = await queryNewEmails();
 
   if (emailPaths.length === 0) {
     log("No new emails to process");
     return;
   }
 
+  if (LIMIT > 0 && emailPaths.length > LIMIT) {
+    log(`Limiting to ${LIMIT} of ${emailPaths.length} emails`);
+    emailPaths = emailPaths.slice(0, LIMIT);
+  }
+
+  // Prove the claude CLI is usable BEFORE any spend. On failure the mail stays
+  // tag:new and the next hook run retries.
+  const pf = await preflight();
+  if (!pf.ok) {
+    alertCliFailure("preflight", pf.detail, log);
+    process.exit(2);
+  }
+  log(`Preflight: claude CLI ok (${pf.detail})`);
+
+  // Load corrections for the few-shot block
+  const correctionsData = loadCorrections();
+  const corrections = correctionsData.corrections || [];
+  if (corrections.length > 0) {
+    log(`Loaded ${corrections.length} corrections for few-shot learning`);
+  }
+
+  const classifier = createClassifier({ corrections, log });
+  log(`Classifier: model=${classifier.config.model} threshold=${classifier.config.threshold} stage2ForExtraction=${classifier.config.stage2ForExtraction}`);
+
   log(`Processing ${emailPaths.length} emails with ${CONCURRENCY} concurrent workers...`);
 
-  // Process all emails with concurrency (pass corrections to each worker)
   const results = await runWithConcurrency(
     emailPaths,
-    (filePath, index, total) => processOneEmail(filePath, index, total, corrections),
+    (filePath, index, total) => processOneEmail(filePath, index, total, classifier),
     CONCURRENCY
   );
 
@@ -460,17 +418,22 @@ async function main() {
   for (const result of results) {
     if (result.error) {
       failed++;
+      log(`Worker error: ${result.error.message || result.error}`);
     } else if (result.status === "job_related") {
       toSend.push(result.data);
       jobRelated++;
-    } else if (result.status === "classify_failed") {
+    } else if (result.status === "classify_failed" || result.status === "parse_failed") {
       failed++;
     } else {
       skipped++;
     }
   }
 
-  log(`Results: ${jobRelated} job-related, ${skipped} skipped, ${failed} failed`);
+  const t = classifier.totals;
+  log(
+    `Results: ${jobRelated} to import, ${skipped} skipped, ${failed} failed | ` +
+      `claude calls=${t.calls} stage1=${t.stage1} stage2=${t.stage2} failures=${t.failures} cost=$${t.cost.toFixed(4)} time=${(t.durationMs / 1000).toFixed(1)}s`
+  );
 
   if (toSend.length > 0) {
     log(`Sending ${toSend.length} emails to server...`);
