@@ -55,6 +55,7 @@ const CLASSIFICATION_OPTIONS = [
   { value: "rejection", label: "Rejection" },
   { value: "offer", label: "Job Offer" },
   { value: "follow_up", label: "Follow-up" },
+  { value: "other", label: "Other / unsure" },
 ];
 
 const STATUS_OPTIONS = [
@@ -200,10 +201,15 @@ function EmailImportsContainer({
     <>
       <Card className="min-h-[85vh]">
         <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle className="flex items-center gap-2">
-            <Mail className="h-5 w-5" />
-            Email Imports
-          </CardTitle>
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Mail className="h-5 w-5" />
+              Email Imports
+            </CardTitle>
+            <p className="text-sm text-muted-foreground mt-1">
+              Confident imports are filed to jobs automatically. Only mail the classifier was unsure about waits here.
+            </p>
+          </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={handleRefresh}>
               <RefreshCw className="h-4 w-4 mr-1" />
@@ -271,10 +277,10 @@ function EmailImportsContainer({
           ) : imports.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
               <Mail className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p>No email imports found</p>
+              <p>{statusFilter === "pending" ? "Nothing needs review" : "No email imports found"}</p>
               <p className="text-sm mt-2">
                 {statusFilter === "pending"
-                  ? "Run the email sync to import new job-related emails"
+                  ? "Confident imports are filed automatically; switch the status filter to Approved to see them"
                   : "Try adjusting the filters"}
               </p>
             </div>

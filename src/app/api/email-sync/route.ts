@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/db";
+import { autoFileImport, type ImportExtractedData } from "@/lib/email/auto-file";
 
 const API_KEY = process.env.EMAIL_SYNC_API_KEY;
 const MONITORED_EMAILS = (
@@ -9,6 +10,8 @@ const MONITORED_EMAILS = (
 interface SyncResult {
   processed: number;
   skipped: number;
+  filed: number;
+  pending: number;
   errors: string[];
 }
 
@@ -28,14 +31,12 @@ interface PreClassifiedImport {
   classification: string;
   confidence: number;
   isOutbound: boolean;
-  extractedData?: {
-    company?: string;
-    jobTitle?: string;
-    location?: string;
-    applicationUrl?: string;
-    recruiterName?: string;
-    salaryRange?: string;
-  };
+  extractedData?: ImportExtractedData;
+  /** false = the classifier is confident; the server files it without review. Missing = pending. */
+  reviewRequired?: boolean;
+  classifier?: string;
+  classificationStage?: number | null;
+  classificationReason?: string | null;
 }
 
 /**
@@ -109,6 +110,8 @@ async function handlePreClassifiedImports(
   const result: SyncResult = {
     processed: 0,
     skipped: 0,
+    filed: 0,
+    pending: 0,
     errors: [],
   };
 
@@ -159,30 +162,54 @@ async function handlePreClassifiedImports(
         continue;
       }
 
-      // Store in database
-      await prisma.emailImport.create({
-        data: {
-          userId,
-          emailAccountId: emailAccount.id,
-          messageId: imp.messageId,
+      const emailDate = new Date(imp.emailDate);
+
+      // File confident imports (link or create the Job) and store the import
+      // in one transaction so nothing is left half-filed.
+      const outcome = await prisma.$transaction(async (tx) => {
+        const filed = await autoFileImport(tx, userId, {
           subject: imp.subject,
-          fromEmail: imp.fromEmail,
-          fromName: imp.fromName || null,
-          toEmail: imp.toEmail,
-          emailDate: new Date(imp.emailDate),
-          bodyText: imp.bodyText?.substring(0, 10000) || null,
-          bodyHtml: imp.bodyHtml?.substring(0, 50000) || null,
+          bodyText: imp.bodyText,
+          emailDate,
           classification: imp.classification,
           confidence: imp.confidence,
-          isOutbound: imp.isOutbound,
-          extractedData: imp.extractedData
-            ? JSON.stringify(imp.extractedData)
-            : null,
-          status: "pending",
-        },
+          reviewRequired: imp.reviewRequired,
+          extractedData: imp.extractedData,
+        });
+
+        const extractedData: Record<string, unknown> = { ...(imp.extractedData || {}) };
+        if (imp.classificationStage) extractedData.classifierStage = imp.classificationStage;
+        if (imp.classificationReason) extractedData.classifierReason = imp.classificationReason;
+        extractedData.autoFileNote = filed.note;
+
+        await tx.emailImport.create({
+          data: {
+            userId,
+            emailAccountId: emailAccount.id,
+            messageId: imp.messageId,
+            subject: imp.subject,
+            fromEmail: imp.fromEmail,
+            fromName: imp.fromName || null,
+            toEmail: imp.toEmail,
+            emailDate,
+            bodyText: imp.bodyText?.substring(0, 10000) || null,
+            bodyHtml: imp.bodyHtml?.substring(0, 50000) || null,
+            classification: imp.classification,
+            confidence: imp.confidence,
+            isOutbound: imp.isOutbound,
+            extractedData: JSON.stringify(extractedData),
+            status: filed.status,
+            jobId: filed.jobId,
+            reviewedAt: filed.status === "approved" ? new Date() : null,
+          },
+        });
+
+        return filed;
       });
 
       result.processed++;
+      if (outcome.status === "approved") result.filed++;
+      else result.pending++;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error";
@@ -405,6 +432,8 @@ export const GET = async (req: NextRequest) => {
  *   - classification: Delete all with this classification type
  *   - messageId: Delete specific email by messageId
  *   - confirm: Must be "true" to actually delete (safety check, only for classification)
+ *   - force: "true" to delete a messageId import even if it was approved/filed to a job
+ *     (by default those are kept and reported as { deleted: 0, kept: true })
  */
 export const DELETE = async (req: NextRequest) => {
   // Verify API key
@@ -424,6 +453,7 @@ export const DELETE = async (req: NextRequest) => {
     const classification = searchParams.get("classification");
     const messageId = searchParams.get("messageId");
     const confirm = searchParams.get("confirm");
+    const force = searchParams.get("force") === "true";
 
     // Delete by messageId (single email)
     if (messageId) {
@@ -444,6 +474,16 @@ export const DELETE = async (req: NextRequest) => {
         return NextResponse.json({
           message: "Email import not found",
           deleted: 0,
+        });
+      }
+
+      // A reclassification to "other" must not silently undo a filing the
+      // owner (or auto-file) already made; keep approved imports unless forced.
+      if (!force && (emailImport.status === "approved" || emailImport.jobId)) {
+        return NextResponse.json({
+          message: "Email import kept: already approved/filed to a job (use force=true to delete)",
+          deleted: 0,
+          kept: true,
         });
       }
 
