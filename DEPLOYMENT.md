@@ -1,5 +1,10 @@
 # JobSync Production Deployment Guide
 
+> **Status (2026-11):** the Mac pipeline and the Chrome extension no longer use the server
+> (see Local Machine Setup). On the abaj.ai VPS the site is served by **OpenResty**, not stock
+> nginx: the vhost is `/usr/local/openresty/nginx/conf/conf.d/15-jobs.conf`, reloaded with
+> `systemctl reload openresty`. The nginx paths below describe the original setup.
+
 Deploy JobSync to your server at `jobs.abaj.ai` with Docker and nginx.
 
 ## Architecture Overview
@@ -188,74 +193,66 @@ docker compose -f docker-compose.prod.yml up -d
 
 ## Local Machine Setup
 
-Configure your local machine to sync emails to the server.
+The Mac side no longer talks to the server. A notmuch hook classifies job mail with Claude,
+tags it in notmuch, and writes job applications to `~/.jobsync/jobs-feed.json`. The JobSync
+Chrome extension reads that file through its native messaging host
+(see the jobsync-chrome-extension README).
 
-### 1. Update Environment
+### 1. Configuration
 
-Add to `~/.jobsync/config`:
+`~/.jobsync/config` needs only `MONITORED_EMAILS` (comma-separated). The script reads that
+one variable from the file; nothing is sourced into the environment. Optional overrides go in the
+environment:
+
 ```bash
-# Remote server (production)
-JOBSYNC_API_KEY="<same-key-as-server-.env.production>"
-JOBSYNC_API_URL="https://jobs.abaj.ai/api/email-sync"
-
-# Email accounts
-MONITORED_EMAILS="j@abaj.ai,aayushbajaj7@gmail.com"
-
-# Classifier (optional overrides; defaults shown)
-# CLAUDE_BIN="$HOME/.local/bin/claude"      # Claude Code CLI, must be logged in (`claude auth status`)
+# CLAUDE_BIN="$HOME/.local/bin/claude"      # Claude Code CLI, logged in to the subscription
 # JOBSYNC_CLAUDE_MODEL="opus"
-# JOBSYNC_CONFIDENCE_THRESHOLD="0.8"        # below this, stage 2 reads the full body
-# JOBSYNC_STAGE2_FOR_EXTRACTION="1"         # also read the body of confident job mail to extract company/title
-# JOBSYNC_CLAUDE_MAX_BUDGET_USD="0.25"      # per-call cap
-# JOBSYNC_CLAUDE_TIMEOUT_MS="120000"
-# JOBSYNC_CONCURRENCY="2"                   # parallel CLI calls (each has ~3s startup)
+# JOBSYNC_CONFIDENCE_THRESHOLD="0.8"        # below this, stage 2 reads a short excerpt
+# JOBSYNC_SINCE="2026-10-09"                # oldest mail date considered
+# JOBSYNC_MAX_PER_RUN="100"                 # messages per run (0 = all)
+# JOBSYNC_CONCURRENCY="2"                   # parallel CLI calls
 ```
 
-Classification runs through the local Claude Code CLI in headless mode
-(`claude -p --output-format json --tools "" --json-schema ...`), billed to the
-owner's claude.ai subscription. There is no API key and no Ollama. Every call is
-logged to `~/.jobsync/claude-usage.jsonl` (cost, duration, tokens). If the CLI
-is logged out, the sync alerts and leaves mail untagged for the next run.
+### 2. How classification works
 
-### 2. Install Local Sync Dependencies
+`scripts/jobsync-mail-classify.js` (library: `scripts/lib/mail-classifier.js`):
+
+1. **Stage 0, local:** mail tagged by earlier hook steps (Finance, alpaca, tern, ...),
+   transactional sender domains, and the SEEK/LinkedIn/Indeed rules. No Claude call.
+2. **Stage 1, headers only:** direction, From, To, Subject, Date and whether it is list mail.
+   Claude never sees the body here.
+3. **Stage 2, short excerpt:** only when stage 1 is unsure, or an application still lacks a
+   company or title. At most 1,500 characters, with quoted history removed and links, addresses
+   and long numbers replaced.
+
+Calls use the headless CLI (`claude -p --output-format json --tools "" --json-schema ...`) on the
+owner's claude.ai subscription. The script removes `ANTHROPIC_API_KEY` from its environment and
+refuses to run unless `claude auth status` reports `authMethod=claude.ai`. Usage per call goes
+to `~/.jobsync/claude-usage.jsonl`.
+
+Results:
+- tag `jobsync/<type>` (job_application, job_response, interview, rejection, offer,
+  follow_up, other). A failed classification leaves the mail untagged for the next run.
+- each job_application appends `{id, title, company, location, date, advertised}` to
+  `~/.jobsync/jobs-feed.json`; the id comes from the Message-ID, so a message never makes two jobs.
+- owner corrections (`jobsync-was/<original>` tags from the Emacs helpers) are recorded in
+  `~/.jobsync/corrections.json` (headers only) and keep the feed in step.
+- `~/.jobsync/mail-classify.log` holds message ids, labels, stages and cost, never subjects,
+  senders or body text.
+
+### 3. Notmuch hook
+
+The live hook is `~/Maildir/.notmuch/hooks/post-new` (notmuch's `database.hook_dir`), a stow
+symlink into the dotfiles repo. Its JobSync step runs the script in the background, so
+`notmuch new` is not held up. A lock in `~/.jobsync/mail-classify.lock` makes an overlapping
+run exit at once.
+
+### 4. Test
 
 ```bash
-cd /path/to/jobsync
-npm install  # Ensure mailparser and other deps are installed
-```
-
-### 3. Update Notmuch Hook
-
-Edit `~/Maildir/.notmuch/hooks/post-new`:
-```bash
-#!/bin/bash
-# Sync to remote JobSync server
-
-# Source config
-source ~/.jobsync/config
-
-# Record owner corrections (jobsync-was/* tags), then classify and sync
-cd /Users/aayushbajaj/lattice/code/private/jobsync
-node scripts/jobsync-scan-corrections.js >> ~/.jobsync/local-sync.log 2>&1
-node scripts/jobsync-local-sync.js >> ~/.jobsync/local-sync.log 2>&1
-```
-
-The live hook is `~/Maildir/.notmuch/hooks/post-new` (notmuch's `database.hook_dir`).
-
-### 4. Test Local Sync
-
-```bash
-# Prove the CLI is logged in
-claude auth status
-
-# Classify new mail without tagging or sending anything
-cd /path/to/jobsync
-source ~/.jobsync/config
-node scripts/jobsync-local-sync.js --dry-run --limit 5
-
-# Measure the classifier against real labelled mail before trusting it
-node scripts/jobsync-eval-classifier.js --build
-node scripts/jobsync-eval-classifier.js --run
+claude auth status                                   # logged in, authMethod claude.ai
+node scripts/jobsync-mail-classify.js --dry-run --limit 5   # ids and labels only; no tags or feed
+npx jest __tests__/mail-classifier.spec.js
 ```
 
 ---
