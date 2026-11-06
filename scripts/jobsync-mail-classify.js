@@ -205,7 +205,12 @@ async function scanCorrections(emails, classifier) {
   let recorded = 0;
   for (const id of ids) {
     const msg = await readMessage(id, emails);
-    if (!msg) continue;
+    if (!msg) {
+      // No file left to read the correction from; drop the marker so it is not retried forever.
+      await tagMessage(id, [], [...CLASSIFICATION_TYPES.map((t) => `jobsync-was/${t}`), "jobsync-corrected"]);
+      log(`${id} correction marker dropped: message has no file`);
+      continue;
+    }
     const originalType = (msg.tags.find((t) => t.startsWith("jobsync-was/")) || "").slice("jobsync-was/".length);
     const correctedType = (msg.tags.find((t) => t.startsWith("jobsync/")) || "").slice("jobsync/".length);
     if (!CLASSIFICATION_TYPES.includes(originalType) || !CLASSIFICATION_TYPES.includes(correctedType)) continue;
