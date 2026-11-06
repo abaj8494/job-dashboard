@@ -2,7 +2,7 @@
  * Claude Classification Prompts
  *
  * Single source of truth for the two-stage email classifier used by
- * jobsync-local-sync, jobsync-reclassify-untagged, jobsync-scan-corrections,
+ * jobsync-reclassify-untagged, jobsync-scan-corrections,
  * jobsync-backfill-metadata and the eval harness.
  *
  * Stage 1 sees metadata only (from, to, subject, date, a short snippet) and
