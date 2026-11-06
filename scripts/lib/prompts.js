@@ -47,8 +47,8 @@ const CLASSIFICATION_SYSTEM_PROMPT = `You classify emails for a personal job-app
 Confidence is your probability that the category is correct, from 0 to 1.
 - 0.9–1.0: obvious from the sender and subject alone (job-board confirmations, clear alerts, obvious marketing, obvious personal mail).
 - 0.8–0.9: clear but inferred.
-- below 0.8: genuinely unsure, the snippet is insufficient, or the sender is a company whose message could be a response, follow-up, interview or rejection.
-When you are shown only metadata and a short snippet, do NOT guess between job-related categories: report the lower confidence so the full email is read.
+- below 0.8: genuinely unsure, what you were shown is insufficient, or the sender is a company whose message could be a response, follow-up, interview or rejection.
+When you are shown only the headers or a short part of the email, do NOT guess between job-related categories: report the lower confidence so more of the email is read.
 
 ## Reason
 
