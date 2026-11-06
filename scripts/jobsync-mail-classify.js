@@ -305,14 +305,16 @@ async function main() {
 
     const counts = Object.fromEntries(CLASSIFICATION_TYPES.map((t) => [t, 0]));
     let failed = 0;
+    let gone = 0;
     let feedAdded = 0;
     const stages = { 0: 0, 1: 0, 2: 0 };
 
     await mapLimit(ids, CONCURRENCY, async (id) => {
       const msg = await readMessage(id, emails);
       if (!msg) {
-        log(`${id} skipped: no file`);
-        failed++;
+        // Removed from the index since the query (moved, trashed or deleted by a sync).
+        log(`${id} gone from the index; skipped`);
+        gone++;
         return;
       }
       const r = await classifier.classify(msg.email, { tags: msg.tags, label: id });
@@ -342,7 +344,7 @@ async function main() {
 
     const t = classifier.totals;
     const summary =
-      `run done: ${ids.length} processed, ${failed} failed (left for retry), ` +
+      `run done: ${ids.length} processed, ${failed} failed (left for retry), ${gone} gone, ` +
       `${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(" ")} | ` +
       `stage0=${stages[0]} stage1=${stages[1]} stage2=${stages[2]} | feed +${feedAdded} | ` +
       `claude calls=${t.calls} cost=$${t.cost.toFixed(4)} model_time=${(t.durationMs / 1000).toFixed(1)}s wall=${((Date.now() - started) / 1000).toFixed(1)}s` +
@@ -350,7 +352,7 @@ async function main() {
     log(summary);
     if (!process.stdout.isTTY && !DRY_RUN) console.log(summary);
     if (t.tripped) alertCliFailure("classification", "circuit breaker tripped", log);
-    return failed && failed === ids.length ? 1 : 0;
+    return failed && failed === ids.length - gone ? 1 : 0;
   } finally {
     releaseLock();
   }
