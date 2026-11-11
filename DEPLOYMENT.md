@@ -1,7 +1,8 @@
 # JobSync Production Deployment Guide
 
-> **Status (2026-11):** the Mac pipeline and the Chrome extension no longer use the server
-> (see Local Machine Setup). On the abaj.ai VPS the site is served by **OpenResty**, not stock
+> **Status (2026-11):** jobs.abaj.ai is where the person sees what they applied to and when.
+> The Mac's notmuch-hook classifier files job mail there with no review step, and the Chrome
+> extension lists and saves jobs there (see Local Machine Setup). On the abaj.ai VPS the site is served by **OpenResty**, not stock
 > nginx: the vhost is `/usr/local/openresty/nginx/conf/conf.d/15-jobs.conf`, reloaded with
 > `systemctl reload openresty`. The nginx paths below describe the original setup.
 
@@ -193,16 +194,23 @@ docker compose -f docker-compose.prod.yml up -d
 
 ## Local Machine Setup
 
-The Mac side no longer talks to the server. A notmuch hook classifies job mail with Claude,
-tags it in notmuch, and writes job applications to `~/.jobsync/jobs-feed.json`. The JobSync
-Chrome extension reads that file through its native messaging host
-(see the jobsync-chrome-extension README).
+A notmuch hook classifies job mail with Claude, tags it in notmuch, and sends each job-related
+result to jobs.abaj.ai, which files it: it creates the job or links to it, dated by the mail, and
+moves its status forward (`src/lib/email/auto-file.ts`). The JobSync Chrome extension lists the
+server's jobs (see the jobsync-chrome-extension README).
 
 ### 1. Configuration
 
-`~/.jobsync/config` needs only `MONITORED_EMAILS` (comma-separated). The script reads that
-one variable from the file; nothing is sourced into the environment. Optional overrides go in the
-environment:
+`~/.jobsync/config` is read, not sourced; only these variables are taken from it:
+
+```bash
+export MONITORED_EMAILS="j@abaj.ai,aayushbajaj7@gmail.com"
+export JOBSYNC_API_URL="https://jobs.abaj.ai/api/email-sync"   # https only (http is refused except localhost)
+export JOBSYNC_API_KEY="..."                                    # the server's EMAIL_SYNC_API_KEY
+export JOBSYNC_SERVER_SYNC=1    # send to the server; without it results wait in the outbox
+```
+
+Optional overrides go in the environment:
 
 ```bash
 # CLAUDE_BIN="$HOME/.local/bin/claude"      # Claude Code CLI, logged in to the subscription
@@ -233,10 +241,23 @@ to `~/.jobsync/claude-usage.jsonl`.
 Results:
 - tag `jobsync/<type>` (job_application, job_response, interview, rejection, offer,
   follow_up, other). A failed classification leaves the mail untagged for the next run.
-- each job_application appends `{id, title, company, location, date, advertised}` to
-  `~/.jobsync/jobs-feed.json`; the id comes from the Message-ID, so a message never makes two jobs.
+- each job-related result is queued in `~/.jobsync/server-outbox.json` and POSTed to
+  `/api/email-sync` with extracted fields only: messageId, mail date, type, confidence, company,
+  title, location. No subject, sender or body leaves the Mac, and the server stores no mail bodies.
+  The server confirms each import; confirmed mail is tagged `jobsync-server`, and anything
+  unconfirmed (server down, offline, old build) stays queued for the next run. The server skips
+  a messageId it already has, so resends are harmless.
+- the server files a result without review when the classifier is at or above its threshold.
+  It stays **pending** only when it cannot be filed: no company, no job yet and no title, several
+  jobs at that company that the title does not tell apart, or the classifier still unsure after
+  the excerpt. Pending mail shows on jobs.abaj.ai under Email Imports, labelled from the extracted
+  fields (for example "Rejection: Acme (from mail)") with the reason, and stays tagged in notmuch.
 - owner corrections (`jobsync-was/<original>` tags from the Emacs helpers) are recorded in
-  `~/.jobsync/corrections.json` (headers only) and keep the feed in step.
+  `~/.jobsync/corrections.json` (headers only) and sent to the server: corrected to `other`
+  deletes the import (one already filed to a job is kept; change the job on the site), corrected
+  to a job type refiles it with that type.
+- `--refile` sends job mail tagged before the server step existed (`jobsync/<job type>` without
+  `jobsync-server`), re-reading only the details.
 - `~/.jobsync/mail-classify.log` holds message ids, labels, stages and cost, never subjects,
   senders or body text.
 
@@ -251,7 +272,7 @@ run exit at once.
 
 ```bash
 claude auth status                                   # logged in, authMethod claude.ai
-node scripts/jobsync-mail-classify.js --dry-run --limit 5   # ids and labels only; no tags or feed
+node scripts/jobsync-mail-classify.js --dry-run --limit 5   # ids and labels only; no tags, nothing sent
 npx jest __tests__/mail-classifier.spec.js
 ```
 
