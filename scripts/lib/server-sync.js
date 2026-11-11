@@ -32,24 +32,34 @@ function configValue(text, name) {
 
 /**
  * Server URL and key from the environment, else ~/.jobsync/config (only
- * JOBSYNC_API_URL and JOBSYNC_API_KEY are read from it). JOBSYNC_API_URL may
- * be the site root or the /api/email-sync URL. Plain http is refused except
- * for localhost: a redirect from http to https turns a POST into a GET and
- * every import is silently dropped.
+ * JOBSYNC_SERVER_SYNC, JOBSYNC_API_URL and JOBSYNC_API_KEY are read from it).
+ *
+ * Sending is off until JOBSYNC_SERVER_SYNC=1: the server must run the build
+ * with field-only imports and auto-filing first. Until then results wait in
+ * the outbox. JOBSYNC_API_URL may be the site root or the /api/email-sync URL.
+ * Plain http is refused except for localhost: a redirect from http to https
+ * turns a POST into a GET and every import is silently dropped.
  */
 function loadServerConfig({ env = process.env, configFile = DEFAULT_CONFIG } = {}) {
-  let url = env.JOBSYNC_API_URL || "";
-  let key = env.JOBSYNC_API_KEY || env.EMAIL_SYNC_API_KEY || "";
-  if (!url || !key) {
-    let text = "";
-    try {
-      text = fs.readFileSync(configFile, "utf8");
-    } catch (e) {
-      // no config file
-    }
-    url = url || configValue(text, "JOBSYNC_API_URL");
-    key = key || configValue(text, "JOBSYNC_API_KEY");
+  let text = "";
+  try {
+    text = fs.readFileSync(configFile, "utf8");
+  } catch (e) {
+    // no config file
   }
+  const pick = (...names) => {
+    for (const n of names) if (env[n]) return String(env[n]).trim();
+    for (const n of names) {
+      const v = configValue(text, n);
+      if (v) return v;
+    }
+    return "";
+  };
+  if (!/^(1|on|true|yes)$/i.test(pick("JOBSYNC_SERVER_SYNC"))) {
+    return { ok: false, off: true, reason: "server sync off (JOBSYNC_SERVER_SYNC=1 turns it on after the deploy)" };
+  }
+  const url = pick("JOBSYNC_API_URL");
+  const key = pick("JOBSYNC_API_KEY", "EMAIL_SYNC_API_KEY");
   if (!url || !key) return { ok: false, reason: "JOBSYNC_API_URL or JOBSYNC_API_KEY not set" };
 
   let parsed;
@@ -171,8 +181,9 @@ async function flush(cfg, { fetchImpl = globalThis.fetch, file = DEFAULT_OUTBOX,
     for (let i = 0; i < posts.length; i += BATCH) {
       const batch = posts.slice(i, i + BATCH);
       const r = await call(fetchImpl, cfg, "POST", cfg.url, { imports: batch.map((b) => b.payload) });
-      if (!r.ok || !r.json || typeof r.json.processed !== "number") {
-        // No confirmation (wrong URL, auth, server error): keep every item.
+      if (!r.ok || !r.json || typeof r.json.processed !== "number" || typeof r.json.filed !== "number" || !Array.isArray(r.json.failedMessageIds)) {
+        // No confirmation (wrong URL, auth, server error, or a server build
+        // without auto-filing that cannot say which imports failed): keep all.
         const err = `POST ${r.status}${r.json && r.json.error ? ` ${String(r.json.error).slice(0, 120)}` : ""}`;
         batch.forEach((b) => note(b, err));
         out.error = err;

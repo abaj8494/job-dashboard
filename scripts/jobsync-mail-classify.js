@@ -369,7 +369,7 @@ async function main() {
     if (!DRY_RUN) {
       const cfg = server.loadServerConfig();
       if (!cfg.ok) {
-        sent = `server not configured (${cfg.reason}); ${server.loadOutbox().items.length} queued`;
+        sent = `server ${cfg.off ? "off" : "not configured"} (${cfg.reason}); ${server.loadOutbox().items.length} queued`;
       } else {
         const f = await server.flush(cfg, { log, onSent: (item) => tagMessage(item.messageId, [SERVER_TAG]) });
         const left = server.loadOutbox().items.length;

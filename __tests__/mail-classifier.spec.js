@@ -203,11 +203,15 @@ describe("server sync", () => {
 
   test("config: env or ~/.jobsync/config, root or full URL, https only except localhost", () => {
     const cfgFile = path.join(dir, "config");
-    fs.writeFileSync(cfgFile, 'export JOBSYNC_API_KEY="k1"\nexport JOBSYNC_API_URL="https://jobs.example/api/email-sync"\nexport OTHER=x\n');
+    const none = path.join(dir, "none");
+    fs.writeFileSync(cfgFile, 'export JOBSYNC_API_KEY="k1"\nexport JOBSYNC_API_URL="https://jobs.example/api/email-sync"\n# export JOBSYNC_API_URL="http://localhost:3000"\n');
+    expect(server.loadServerConfig({ env: {}, configFile: cfgFile })).toMatchObject({ ok: false, off: true });
+    fs.appendFileSync(cfgFile, "export JOBSYNC_SERVER_SYNC=1\n");
     expect(server.loadServerConfig({ env: {}, configFile: cfgFile })).toMatchObject({ ok: true, url: "https://jobs.example/api/email-sync", origin: "https://jobs.example", key: "k1" });
-    expect(server.loadServerConfig({ env: { JOBSYNC_API_URL: "http://localhost:3000", JOBSYNC_API_KEY: "k" } }).url).toBe("http://localhost:3000/api/email-sync");
-    expect(server.loadServerConfig({ env: { JOBSYNC_API_URL: "http://jobs.example", JOBSYNC_API_KEY: "k" } }).ok).toBe(false);
-    expect(server.loadServerConfig({ env: {}, configFile: path.join(dir, "none") }).ok).toBe(false);
+    const on = { JOBSYNC_SERVER_SYNC: "1", JOBSYNC_API_KEY: "k" };
+    expect(server.loadServerConfig({ env: { ...on, JOBSYNC_API_URL: "http://localhost:3000" }, configFile: none }).url).toBe("http://localhost:3000/api/email-sync");
+    expect(server.loadServerConfig({ env: { ...on, JOBSYNC_API_URL: "http://jobs.example" }, configFile: none }).ok).toBe(false);
+    expect(server.loadServerConfig({ env: { JOBSYNC_SERVER_SYNC: "1" }, configFile: none }).ok).toBe(false);
   });
 
   function fakeServer(handler) {
@@ -229,6 +233,10 @@ describe("server sync", () => {
     expect(server.loadOutbox(file).items).toHaveLength(2);
 
     const { fetchImpl, calls } = fakeServer(() => [200, { processed: 1, filed: 1, pending: 0, failedMessageIds: ["b@x"] }]);
+    // The deployed build before auto-filing answers without filed/failedMessageIds: nothing counts as sent.
+    const old = fakeServer(() => [200, { processed: 0, skipped: 0, errors: ["subject missing"] }]);
+    expect(await server.flush(cfg, { fetchImpl: old.fetchImpl, file })).toMatchObject({ sent: 0, error: "POST 200" });
+    expect(server.loadOutbox(file).items).toHaveLength(2);
     const sent = [];
     const r = await server.flush(cfg, { fetchImpl, file, onSent: async (i) => sent.push(i.messageId) });
     expect(calls).toHaveLength(1);
@@ -236,7 +244,7 @@ describe("server sync", () => {
     expect(calls[0].body.imports.map((i) => i.classification).sort()).toEqual(["interview", "rejection"]);
     expect(r).toMatchObject({ sent: 1, filed: 1, failed: 1 });
     expect(sent).toEqual(["a@x"]);
-    expect(server.loadOutbox(file).items.map((i) => [i.messageId, i.attempts])).toEqual([["b@x", 1]]);
+    expect(server.loadOutbox(file).items.map((i) => [i.messageId, i.attempts])).toEqual([["b@x", 2]]);
   });
 
   test("no confirmation (auth error, outage, network) keeps everything", async () => {
@@ -254,7 +262,7 @@ describe("server sync", () => {
     server.enqueue("correct", "c@x", server.toImport(mail({ messageId: "c@x" }), result({ type: "offer" }), { ownerSet: true }), file);
     server.enqueue("delete", "d@x", null, file);
     const { fetchImpl, calls } = fakeServer(({ method }) =>
-      method === "POST" ? [200, { processed: 0, filed: 0, pending: 0 }] : method === "PATCH" ? [200, { updated: 1, filed: 1 }] : [200, { deleted: 0, kept: true }]
+      method === "POST" ? [200, { processed: 0, filed: 0, pending: 0, failedMessageIds: [] }] : method === "PATCH" ? [200, { updated: 1, filed: 1 }] : [200, { deleted: 0, kept: true }]
     );
     const r = await server.flush(cfg, { fetchImpl, file });
     expect(calls.map((c) => c.method)).toEqual(["POST", "PATCH", "DELETE"]);
