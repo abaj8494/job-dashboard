@@ -271,11 +271,11 @@ export async function createJobRecord(db: Db, userId: string, f: NewJobFields) {
 }
 
 /**
- * The existing job for this company + title, if there is exactly one sensible
- * match (exact company, then exact or word-boundary title). Used by POST
- * /api/jobs so saving the same ad twice does not make two jobs.
+ * The existing job for this company + title: exact company, then exact title,
+ * then (unless exact) a word-boundary title match. POST /api/jobs uses exact,
+ * so adding "Data Analyst" next to "Senior Data Analyst" makes a new job.
  */
-export async function findJob(db: Db, userId: string, company: string, title: string) {
+export async function findJob(db: Db, userId: string, company: string, title: string, { exact = false } = {}) {
   const candidates = await db.job.findMany({
     where: { userId, Company: { value: norm(company) } },
     include: { JobTitle: true, Status: true, Company: true },
@@ -284,7 +284,7 @@ export async function findJob(db: Db, userId: string, company: string, title: st
   const t = norm(title);
   return (
     candidates.find((j) => norm(j.JobTitle?.label) === t) ||
-    candidates.find((j) => titlesMatch(norm(j.JobTitle?.label), t)) ||
+    (exact ? undefined : candidates.find((j) => titlesMatch(norm(j.JobTitle?.label), t))) ||
     null
   );
 }

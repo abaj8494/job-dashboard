@@ -53,7 +53,7 @@ export const POST = async (req: NextRequest) => {
     if (!user) return NextResponse.json({ error: "No user found in database" }, { status: 500 });
 
     const result = await prisma.$transaction(async (tx) => {
-      const existing = await findJob(tx, user.id, company, title);
+      const existing = await findJob(tx, user.id, company, title, { exact: true });
       if (existing) return { id: existing.id, created: false };
       const appliedDate = appliedDateFrom(body.appliedDate) || new Date();
       const job = await createJobRecord(tx, user.id, {

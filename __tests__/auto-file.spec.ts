@@ -208,5 +208,8 @@ describe("findJob", () => {
     expect((await findJob(db as never, "u1", " ACME ", "software engineer"))?.id).toBe("job-2");
     expect(db.job.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: "u1", Company: { value: "acme" } } }));
     expect(await findJob(db as never, "u1", "Acme", "Designer")).toBeNull();
+    db.job.findMany.mockResolvedValue([existingJob({ JobTitle: { label: "Senior Data Analyst" } })]);
+    expect((await findJob(db as never, "u1", "Acme", "Data Analyst"))?.id).toBe("job-1");
+    expect(await findJob(db as never, "u1", "Acme", "Data Analyst", { exact: true })).toBeNull();
   });
 });
