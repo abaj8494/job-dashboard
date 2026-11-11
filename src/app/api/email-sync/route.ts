@@ -430,7 +430,13 @@ export const PATCH = async (req: NextRequest) => {
                 filed++;
               }
             } else if (update.ownerCorrection === true && emailImport.status === "approved" && emailImport.jobId && classification !== emailImport.classification) {
-              const outcome = await applyOwnerCorrection(tx, emailImport.jobId, classification, emailImport.emailDate);
+              const outcome = await applyOwnerCorrection(tx, {
+                jobId: emailImport.jobId,
+                importId: emailImport.id,
+                oldClassification: emailImport.classification,
+                classification,
+                emailDate: emailImport.emailDate,
+              });
               mergedData.ownerCorrectionNote = outcome.note;
               if (outcome.changed) corrected++;
             }

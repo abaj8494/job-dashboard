@@ -294,33 +294,63 @@ export interface OwnerCorrectionOutcome {
   note: string;
 }
 
+export interface OwnerCorrectionInput {
+  jobId: string;
+  importId: string;
+  oldClassification: string;
+  classification: string;
+  emailDate: Date;
+}
+
+/** For the status a job's filed mail implies: a rejection outranks everything, then offer, interview, applied. */
+const IMPLIED_RANK: Record<string, number> = { applied: 1, interview: 2, offer: 3, rejected: 4 };
+
+function impliedStatus(types: string[]): string | null {
+  let best: string | null = null;
+  for (const t of types) {
+    const target = STATUS_FOR_CLASSIFICATION[t] ?? null;
+    if (target && (best === null || (IMPLIED_RANK[target] ?? 0) > (IMPLIED_RANK[best] ?? 0))) best = target;
+  }
+  return best;
+}
+
 /**
- * The owner retagged mail that is already filed to a job (for example a
- * response to a rejection). Unlike automatic filing this may move the status
- * backwards: it is the owner's explicit call. follow_up and other leave the
- * status alone (other is handled by deleting the import). An application or
+ * The owner retagged mail that is already filed to a job (for example the
+ * mail that rejected it was really an interview invite). The job's status is
+ * what all its filed mail implies; it moves only when this correction changes
+ * that implied status, and then to the new value, which may be backwards. So
+ * correcting an old ack (response -> application) never undoes a later
+ * rejection, and a status the owner set by hand on the site is left alone
+ * unless the correction changes what the mail says. An application or
  * response also marks the job applied, dated by the mail if it has no date.
  */
-export async function applyOwnerCorrection(
-  db: Db,
-  jobId: string,
-  classification: string,
-  emailDate: Date
-): Promise<OwnerCorrectionOutcome> {
-  const job = await db.job.findUnique({ where: { id: jobId }, include: { Status: true } });
+export async function applyOwnerCorrection(db: Db, c: OwnerCorrectionInput): Promise<OwnerCorrectionOutcome> {
+  const job = await db.job.findUnique({ where: { id: c.jobId }, include: { Status: true } });
   if (!job) return { changed: false, note: "owner correction: job not found" };
 
+  const others = (
+    await db.emailImport.findMany({ where: { jobId: c.jobId, status: "approved" }, select: { id: true, classification: true } })
+  )
+    .filter((i) => i.id !== c.importId)
+    .map((i) => i.classification);
+  const before = impliedStatus([...others, c.oldClassification]);
+  const after = impliedStatus([...others, c.classification]);
+
   const data: Prisma.JobUpdateInput = {};
-  const target = STATUS_FOR_CLASSIFICATION[classification] ?? null;
-  if (target && job.Status?.value !== target) {
-    const status = await db.jobStatus.findUnique({ where: { value: target } });
+  if (after && after !== before && job.Status?.value !== after) {
+    const status = await db.jobStatus.findUnique({ where: { value: after } });
     if (status) data.Status = { connect: { id: status.id } };
   }
-  if ((classification === "job_application" || classification === "job_response") && (!job.applied || !job.appliedDate)) {
+  if ((c.classification === "job_application" || c.classification === "job_response") && (!job.applied || !job.appliedDate)) {
     data.applied = true;
-    if (!job.appliedDate) data.appliedDate = emailDate;
+    if (!job.appliedDate) data.appliedDate = c.emailDate;
   }
-  if (Object.keys(data).length === 0) return { changed: false, note: `owner correction to ${classification}: job unchanged` };
-  await db.job.update({ where: { id: jobId }, data });
-  return { changed: true, note: `owner correction to ${classification}${data.Status ? `: status ${job.Status?.value || "none"} -> ${target}` : ""}` };
+  if (Object.keys(data).length === 0) {
+    return { changed: false, note: `owner correction ${c.oldClassification} -> ${c.classification}: job unchanged (mail implies ${after || "no status"})` };
+  }
+  await db.job.update({ where: { id: c.jobId }, data });
+  return {
+    changed: true,
+    note: `owner correction ${c.oldClassification} -> ${c.classification}${data.Status ? `: status ${job.Status?.value || "none"} -> ${after}` : ""}`,
+  };
 }
