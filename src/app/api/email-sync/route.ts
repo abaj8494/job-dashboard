@@ -391,7 +391,11 @@ export const PATCH = async (req: NextRequest) => {
             // Ignore parse errors
           }
 
-          const mergedData: Record<string, unknown> = { ...existingData, ...update.extractedData };
+          // A missing field in the update (null or empty) never erases a stored one.
+          const incoming = Object.fromEntries(
+            Object.entries(update.extractedData || {}).filter(([, v]) => v !== null && v !== undefined && v !== "")
+          );
+          const mergedData: Record<string, unknown> = { ...existingData, ...incoming };
           if (update.classificationStage) mergedData.classifierStage = update.classificationStage;
           if (update.classificationReason) mergedData.classifierReason = update.classificationReason;
 
