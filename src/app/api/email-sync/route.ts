@@ -18,17 +18,21 @@ interface SyncResult {
 }
 
 /**
- * Pre-classified email import format (sent from the local machine, which runs
- * the two-stage Claude classifier in scripts/jobsync-local-sync.js)
+ * Pre-classified email import format, sent by the Mac's notmuch-hook
+ * classifier (scripts/jobsync-mail-classify.js). That client sends extracted
+ * fields only: no subject, sender or body. The header fields stay accepted
+ * for older clients, but mail bodies are never stored.
  */
 interface PreClassifiedImport {
   messageId: string;
-  subject: string;
-  fromEmail: string;
+  subject?: string;
+  fromEmail?: string;
   fromName?: string;
-  toEmail: string;
+  toEmail?: string;
   emailDate: string; // ISO date string
+  /** Ignored: the server does not store mail bodies. */
   bodyText?: string;
+  /** Ignored: the server does not store mail bodies. */
   bodyHtml?: string;
   classification: string;
   confidence: number;
@@ -121,8 +125,8 @@ async function handlePreClassifiedImports(
   // Ensure email accounts exist
   const uniqueEmails = new Set<string>();
   for (const imp of imports) {
-    uniqueEmails.add(imp.fromEmail);
-    uniqueEmails.add(imp.toEmail);
+    if (imp.fromEmail) uniqueEmails.add(imp.fromEmail);
+    if (imp.toEmail) uniqueEmails.add(imp.toEmail);
   }
 
   for (const email of uniqueEmails) {
@@ -141,6 +145,11 @@ async function handlePreClassifiedImports(
 
   for (const imp of imports) {
     try {
+      if (!imp || typeof imp.messageId !== "string" || !imp.messageId || !imp.classification) {
+        result.errors.push("Import without messageId or classification");
+        if (imp && typeof imp.messageId === "string") result.failedMessageIds.push(imp.messageId);
+        continue;
+      }
       // Check for duplicate
       const existing = await prisma.emailImport.findUnique({
         where: { messageId: imp.messageId },
@@ -167,13 +176,19 @@ async function handlePreClassifiedImports(
       }
 
       const emailDate = new Date(imp.emailDate);
+      if (Number.isNaN(emailDate.getTime())) {
+        result.errors.push(`Invalid emailDate for ${imp.messageId}`);
+        result.failedMessageIds.push(imp.messageId);
+        continue;
+      }
+      const subject = imp.subject || describeImport(imp);
 
       // File confident imports (link or create the Job) and store the import
       // in one transaction so nothing is left half-filed.
       const outcome = await prisma.$transaction(async (tx) => {
         const filed = await autoFileImport(tx, userId, {
-          subject: imp.subject,
-          bodyText: imp.bodyText,
+          subject,
+          bodyText: null,
           emailDate,
           classification: imp.classification,
           confidence: imp.confidence,
@@ -191,13 +206,13 @@ async function handlePreClassifiedImports(
             userId,
             emailAccountId: emailAccount.id,
             messageId: imp.messageId,
-            subject: imp.subject,
-            fromEmail: imp.fromEmail,
+            subject,
+            fromEmail: imp.fromEmail || "",
             fromName: imp.fromName || null,
-            toEmail: imp.toEmail,
+            toEmail: imp.toEmail || "",
             emailDate,
-            bodyText: imp.bodyText?.substring(0, 10000) || null,
-            bodyHtml: imp.bodyHtml?.substring(0, 50000) || null,
+            bodyText: null,
+            bodyHtml: null,
             classification: imp.classification,
             confidence: imp.confidence,
             isOutbound: imp.isOutbound,
@@ -228,6 +243,23 @@ async function handlePreClassifiedImports(
     ...result,
     errors: result.errors.length > 0 ? result.errors : undefined,
   });
+}
+
+const LABELS: Record<string, string> = {
+  job_application: "Application",
+  job_response: "Application response",
+  interview: "Interview",
+  rejection: "Rejection",
+  offer: "Offer",
+  follow_up: "Follow-up",
+  other: "Other",
+};
+
+/** A subject line built from the extracted fields, for imports sent without one. */
+function describeImport(imp: PreClassifiedImport): string {
+  const d = imp.extractedData || {};
+  const what = [d.company, d.jobTitle].filter((v) => typeof v === "string" && v.trim()).join(" / ");
+  return `${LABELS[imp.classification] || imp.classification}${what ? `: ${what}` : ""} (from mail)`;
 }
 
 /**
@@ -376,7 +408,7 @@ export const PATCH = async (req: NextRequest) => {
             if (emailImport.status === "pending" && update.reviewRequired === false && user) {
               const outcome = await autoFileImport(tx, user.id, {
                 subject: emailImport.subject,
-                bodyText: emailImport.bodyText,
+                bodyText: null,
                 emailDate: emailImport.emailDate,
                 classification,
                 confidence,
