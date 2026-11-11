@@ -205,6 +205,7 @@ async function flush(cfg, { fetchImpl = globalThis.fetch, file = DEFAULT_OUTBOX,
             classification: b.payload.classification,
             confidence: b.payload.confidence,
             reviewRequired: false,
+            ownerCorrection: true,
             extractedData: b.payload.extractedData,
           })),
         });
