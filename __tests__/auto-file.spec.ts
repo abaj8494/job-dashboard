@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { autoFileImport } from "@/lib/email/auto-file";
+import { autoFileImport, findJob } from "@/lib/email/auto-file";
 
 type Fn = jest.Mock;
 
@@ -39,6 +39,7 @@ const base = {
 const existingJob = (over: Record<string, unknown> = {}) => ({
   id: "job-1",
   applied: true,
+  appliedDate: new Date("2026-09-01T00:00:00Z"),
   Company: { label: "Acme", value: "acme" },
   JobTitle: { label: "Software Engineer" },
   Status: { id: "status-applied", value: "applied" },
@@ -169,5 +170,43 @@ describe("autoFileImport", () => {
     expect(r.status).toBe("pending");
     expect(r.note).toMatch(/no job title/);
     expect(db.job.create).not.toHaveBeenCalled();
+  });
+
+  test("an application ack dates a job that is applied but has no date", async () => {
+    const db = makeDb();
+    db.job.findMany.mockResolvedValue([existingJob({ appliedDate: null })]);
+    await autoFileImport(db as never, "u1", { ...base, classification: "job_application", extractedData: { company: "Acme", jobTitle: "Software Engineer" } });
+    expect(db.job.update).toHaveBeenCalledWith({ where: { id: "job-1" }, data: { applied: true, appliedDate: base.emailDate } });
+  });
+
+  test("a rejection for an unseen job creates it as applied, undated, filed at the mail date, with no mail text", async () => {
+    const db = makeDb();
+    const r = await autoFileImport(db as never, "u1", { ...base, bodyText: null, classification: "rejection", extractedData: { company: "Canva", jobTitle: "Data Engineer" } });
+    expect(r).toMatchObject({ status: "approved", action: "created" });
+    expect(db.job.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        statusId: "status-rejected",
+        applied: true,
+        appliedDate: null,
+        createdAt: base.emailDate,
+        description: "Filed from email (rejection)",
+      }),
+    });
+  });
+
+  test("a follow-up for an unseen job is created as not applied", async () => {
+    const db = makeDb();
+    await autoFileImport(db as never, "u1", { ...base, classification: "follow_up", extractedData: { company: "Canva", jobTitle: "Data Engineer" } });
+    expect(db.job.create).toHaveBeenCalledWith({ data: expect.objectContaining({ applied: false, appliedDate: null, statusId: "status-applied" }) });
+  });
+});
+
+describe("findJob", () => {
+  test("matches exact company, then exact or word-boundary title", async () => {
+    const db = makeDb();
+    db.job.findMany.mockResolvedValue([existingJob({ JobTitle: { label: "Engineering Manager" } }), existingJob({ id: "job-2", JobTitle: { label: "Software Engineer" } })]);
+    expect((await findJob(db as never, "u1", " ACME ", "software engineer"))?.id).toBe("job-2");
+    expect(db.job.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: "u1", Company: { value: "acme" } } }));
+    expect(await findJob(db as never, "u1", "Acme", "Designer")).toBeNull();
   });
 });

@@ -158,7 +158,7 @@ export async function autoFileImport(
         if (status) data.Status = { connect: { id: status.id } };
       }
     }
-    if (isApplication && !match.applied) {
+    if (isApplication && (!match.applied || !match.appliedDate)) {
       data.applied = true;
       data.appliedDate = imp.emailDate;
     }
@@ -176,16 +176,64 @@ export async function autoFileImport(
   // ---- 2. No job yet: create one when we know what it is ---------------------
   if (!jobTitle) return pending(`no job at ${company} and no job title extracted`);
 
+  const job = await createJobRecord(db, userId, {
+    company,
+    title: jobTitle,
+    location: clean(extracted.location),
+    url: clean(extracted.applicationUrl),
+    source: clean(extracted.source),
+    jobType: clean(extracted.jobType),
+    salaryRange: clean(extracted.salaryRange),
+    statusValue: targetStatusValue || "applied",
+    // A rejection, interview or offer means the person applied, even when the
+    // application mail itself was never seen; only an application ack dates it.
+    applied: imp.classification !== "follow_up",
+    appliedDate: isApplication ? imp.emailDate : null,
+    createdAt: imp.emailDate,
+    description: imp.bodyText?.substring(0, 500) || `Filed from email (${imp.classification.replace(/_/g, " ")})`,
+  });
+
+  return {
+    status: "approved",
+    jobId: job.id,
+    action: "created",
+    note: `created ${company} / ${jobTitle} (${targetStatusValue || "applied"})`,
+  };
+}
+
+export interface NewJobFields {
+  company: string;
+  title: string;
+  location?: string | null;
+  url?: string | null;
+  source?: string | null;
+  jobType?: string | null;
+  salaryRange?: string | null;
+  statusValue?: string;
+  applied?: boolean;
+  appliedDate?: Date | null;
+  createdAt?: Date;
+  description?: string | null;
+}
+
+/**
+ * Create a Job with its Company / JobTitle / Location rows (reused when they
+ * exist). Shared by email auto-filing and the extension's POST /api/jobs.
+ */
+export async function createJobRecord(db: Db, userId: string, f: NewJobFields) {
+  const companyValue = norm(f.company);
+  const titleValue = norm(f.title);
+
   const companyRow =
     (await db.company.findUnique({ where: { value: companyValue } })) ||
-    (await db.company.create({ data: { label: company, value: companyValue, createdBy: userId } }));
+    (await db.company.create({ data: { label: f.company.trim(), value: companyValue, createdBy: userId } }));
 
   const titleRow =
     (await db.jobTitle.findUnique({ where: { value: titleValue } })) ||
-    (await db.jobTitle.create({ data: { label: jobTitle, value: titleValue, createdBy: userId } }));
+    (await db.jobTitle.create({ data: { label: f.title.trim(), value: titleValue, createdBy: userId } }));
 
   let locationId: string | null = null;
-  const location = clean(extracted.location);
+  const location = clean(f.location);
   if (location) {
     const locationValue = norm(location);
     const locationRow =
@@ -195,15 +243,15 @@ export async function autoFileImport(
   }
 
   let jobSourceId: string | null = null;
-  const source = norm(extracted.source);
+  const source = norm(f.source);
   if (source) {
     const sourceRow = await db.jobSource.findUnique({ where: { value: source } });
     jobSourceId = sourceRow?.id ?? null;
   }
 
-  const statusRow = await db.jobStatus.findUnique({ where: { value: targetStatusValue || "applied" } });
+  const statusRow = await db.jobStatus.findUnique({ where: { value: f.statusValue || "applied" } });
 
-  const job = await db.job.create({
+  return db.job.create({
     data: {
       userId,
       jobTitleId: titleRow.id,
@@ -211,20 +259,32 @@ export async function autoFileImport(
       locationId,
       statusId: statusRow?.id ?? null,
       jobSourceId,
-      description: imp.bodyText?.substring(0, 500) || `Imported from email: ${imp.subject}`,
-      jobUrl: clean(extracted.applicationUrl),
-      applied: isApplication,
-      appliedDate: isApplication ? imp.emailDate : null,
-      jobType: JOB_TYPE_FOR_EXTRACTED[norm(extracted.jobType)] || "FT",
-      salaryRange: clean(extracted.salaryRange),
-      createdAt: new Date(),
+      description: f.description || null,
+      jobUrl: clean(f.url),
+      applied: f.applied ?? true,
+      appliedDate: f.appliedDate ?? null,
+      jobType: JOB_TYPE_FOR_EXTRACTED[norm(f.jobType)] || "FT",
+      salaryRange: clean(f.salaryRange),
+      createdAt: f.createdAt || new Date(),
     },
   });
+}
 
-  return {
-    status: "approved",
-    jobId: job.id,
-    action: "created",
-    note: `created ${company} / ${jobTitle} (${targetStatusValue || "applied"})`,
-  };
+/**
+ * The existing job for this company + title, if there is exactly one sensible
+ * match (exact company, then exact or word-boundary title). Used by POST
+ * /api/jobs so saving the same ad twice does not make two jobs.
+ */
+export async function findJob(db: Db, userId: string, company: string, title: string) {
+  const candidates = await db.job.findMany({
+    where: { userId, Company: { value: norm(company) } },
+    include: { JobTitle: true, Status: true, Company: true },
+    orderBy: { createdAt: "desc" },
+  });
+  const t = norm(title);
+  return (
+    candidates.find((j) => norm(j.JobTitle?.label) === t) ||
+    candidates.find((j) => titlesMatch(norm(j.JobTitle?.label), t)) ||
+    null
+  );
 }
