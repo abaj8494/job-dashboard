@@ -129,13 +129,19 @@ const STAGE2_INSTRUCTIONS = `You are seeing the headers and a short excerpt of t
 - advertised: false only if the excerpt says the application was unsolicited or speculative; true if it was for an advertised job; null if unclear.
 Only extract what is explicitly stated. If the email is "other", every extraction field is null.`;
 
-function buildStage1Prompt(email) {
-  return `${STAGE1_INSTRUCTIONS}\n\n${headerBlock(email)}`;
+/** The owner has already set the type (a correction, or a tag being refiled). */
+function ownerNote(ownerType) {
+  if (!ownerType || ownerType === "other") return "";
+  return `\n\nThe owner has already classified this email as "${ownerType}". Use that category, and extract its details from what is shown even if you would have judged it differently; still return null for anything not stated.`;
 }
 
-function buildStage2Prompt(email) {
+function buildStage1Prompt(email, ownerType = null) {
+  return `${STAGE1_INSTRUCTIONS}${ownerNote(ownerType)}\n\n${headerBlock(email)}`;
+}
+
+function buildStage2Prompt(email, ownerType = null) {
   const excerpt = redactedExcerpt(email.textBody);
-  return `${STAGE2_INSTRUCTIONS}\n\n${headerBlock(email)}\n\nExcerpt:\n${excerpt || "(no text body)"}`;
+  return `${STAGE2_INSTRUCTIONS}${ownerNote(ownerType)}\n\n${headerBlock(email)}\n\nExcerpt:\n${excerpt || "(no text body)"}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +201,7 @@ function createMailClassifier(options = {}) {
     }
   }
 
-  async function runStage(stage, email, label) {
+  async function runStage(stage, email, label, ownerType = null) {
     if (totals.tripped) return null;
     const params = {
       stage,
@@ -205,7 +211,7 @@ function createMailClassifier(options = {}) {
       maxBudgetUsd: cfg.maxBudgetUsd,
       systemPrompt,
       jsonSchema: stage === 1 ? STAGE1_JSON_SCHEMA : STAGE2_JSON_SCHEMA,
-      prompt: stage === 1 ? buildStage1Prompt(email) : buildStage2Prompt(email),
+      prompt: stage === 1 ? buildStage1Prompt(email, ownerType) : buildStage2Prompt(email, ownerType),
     };
 
     let result = null;
@@ -274,17 +280,22 @@ function createMailClassifier(options = {}) {
     });
 
     if (!ruleApplication) {
-      const s1 = await runStage(1, email, label);
+      const s1 = await runStage(1, email, label, ownerType);
       if (!s1) return null;
       final = { ...s1, advertised: null };
       stage = 1;
     }
 
-    const unsure = final.confidence < cfg.threshold;
-    const missing = final.category === "job_application" && (!merged().company || !merged().jobTitle);
+    const effective = ownerType || final.category;
+    const unsure = !ownerType && final.confidence < cfg.threshold;
+    // An application needs company and title to be filed; an owner-typed job
+    // mail (correction, --refile) at least needs the company to be linked.
+    const missing =
+      (effective === "job_application" && (!merged().company || !merged().jobTitle)) ||
+      (Boolean(ownerType) && ownerType !== "other" && !merged().company);
 
     if (unsure || missing || opts.forceStage2) {
-      const s2 = await runStage(2, email, label);
+      const s2 = await runStage(2, email, label, ownerType);
       if (!s2) return null;
       final = ruleApplication ? { ...s2, category: "job_application", confidence: 1 } : s2;
       stage = 2;

@@ -146,13 +146,43 @@ describe("staging", () => {
     expect(r.extractedData).toMatchObject({ company: "Canva", jobTitle: "Data Engineer" });
   });
 
-  test("an owner-set type wins and keeps Claude's details even when Claude says other", async () => {
-    const { c, calls } = classifier([s1({ category: "other", confidence: 0.9 }), s2({ category: "other", confidence: 0.9, company: "Acme", jobTitle: "Analyst" })]);
+  /** A runner that obeys the real prompts: it judges the mail "other" and nulls details unless told the owner's type. */
+  function obedientRunner() {
+    const calls = [];
+    const runner = jest.fn(async (params) => {
+      calls.push(params);
+      const told = /owner has already classified this email as "(\w+)"/.exec(params.prompt);
+      const base = told
+        ? { category: told[1], confidence: 0.9, reason: "r", company: params.stage === 2 ? "Acme" : null, jobTitle: params.stage === 2 ? "Analyst" : null, location: null }
+        : { category: "other", confidence: 0.95, reason: "r", company: null, jobTitle: null, location: null };
+      return { ok: true, data: params.stage === 2 ? { ...base, advertised: null } : base, usage: { cost_usd: 0 } };
+    });
+    return { runner, calls };
+  }
+
+  test("a correction tells Claude the owner's type, so the details come back", async () => {
+    const r0 = obedientRunner();
+    const c = createMailClassifier({ runner: r0.runner, usageFile: null, retries: 0, threshold: 0.8 });
     const r = await c.classify(mail(), { ownerType: "rejection", forceStage2: true });
-    expect(r).toMatchObject({ type: "rejection", confidence: 1 });
-    expect(r.extractedData).toMatchObject({ company: "Acme", jobTitle: "Analyst" });
-    expect(server.toImport(mail(), r, { ownerSet: true })).toMatchObject({ classification: "rejection", reviewRequired: false, extractedData: { company: "Acme", jobTitle: "Analyst" } });
-    expect(calls).toHaveLength(2);
+    expect(r0.calls.map((x) => x.stage)).toEqual([1, 2]);
+    expect(r0.calls.every((x) => x.prompt.includes('owner has already classified this email as "rejection"'))).toBe(true);
+    expect(r).toMatchObject({ type: "rejection", confidence: 1, extractedData: { company: "Acme", jobTitle: "Analyst" } });
+    expect(server.toImport(mail(), r, { ownerSet: true })).toMatchObject({ reviewRequired: false, extractedData: { company: "Acme", jobTitle: "Analyst" } });
+  });
+
+  test("--refile reaches stage 2 when headers give no company, without forceStage2", async () => {
+    const r0 = obedientRunner();
+    const c = createMailClassifier({ runner: r0.runner, usageFile: null, retries: 0, threshold: 0.8 });
+    const r = await c.classify(mail(), { ownerType: "job_application" });
+    expect(r0.calls.map((x) => x.stage)).toEqual([1, 2]);
+    expect(r).toMatchObject({ type: "job_application", stage: 2, extractedData: { company: "Acme", jobTitle: "Analyst" } });
+  });
+
+  test("without an owner type the prompt has no owner note", async () => {
+    const r0 = obedientRunner();
+    const c = createMailClassifier({ runner: r0.runner, usageFile: null, retries: 0, threshold: 0.8 });
+    expect(await c.classify(mail())).toMatchObject({ type: "other", stage: 1 });
+    expect(r0.calls[0].prompt).not.toMatch(/owner has already/);
   });
 
   test("an owner-set job type is not short-circuited to other by the local rules", async () => {
