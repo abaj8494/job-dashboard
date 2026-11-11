@@ -22,6 +22,8 @@
  *   node scripts/jobsync-mail-classify.js [--dry-run] [--refile] [--since YYYY-MM-DD] [--limit N]
  *
  *   --dry-run  classify and print labels; no tags, no server, no corrections
+ *   --wait-lock N  if another run holds the lock, wait up to N seconds for it
+ *              (the Emacs poll's foreground call uses this)
  *   --refile   also re-classify job mail tagged before the server step existed
  *              (jobsync/<job type> without jobsync-server) and send it
  *   --since    oldest mail date to consider (default JOBSYNC_SINCE or 2026-10-09)
@@ -66,6 +68,8 @@ const REFILE = process.argv.includes("--refile");
 const SERVER_TAG = "jobsync-server";
 const SINCE = argValue("--since", process.env.JOBSYNC_SINCE || "2026-10-09");
 const LIMIT = parseInt(argValue("--limit", process.env.JOBSYNC_MAX_PER_RUN || "100"), 10);
+// --wait-lock N: wait up to N seconds for a running copy to finish instead of exiting.
+const WAIT_LOCK_S = parseInt(argValue("--wait-lock", "0"), 10) || 0;
 
 function notify(message) {
   if (process.platform !== "darwin" || DRY_RUN) return;
@@ -298,11 +302,25 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
+/** Take the lock, waiting up to waitS seconds for a live holder (a dead one is taken over at once). */
+async function acquireLockWaiting(waitS) {
+  const deadline = Date.now() + waitS * 1000;
+  let waited = false;
+  while (!acquireLock()) {
+    if (Date.now() >= deadline) return { ok: false, waited };
+    waited = true;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return { ok: true, waited };
+}
+
 async function main() {
-  if (!acquireLock()) {
-    log("another run holds the lock; exiting");
+  const lock = await acquireLockWaiting(WAIT_LOCK_S);
+  if (!lock.ok) {
+    log(`another run holds the lock; exiting${WAIT_LOCK_S ? ` after waiting ${WAIT_LOCK_S}s` : ""}`);
     return 0;
   }
+  if (lock.waited) log("lock free after waiting for the other run");
   const started = Date.now();
   try {
     const emails = monitoredEmails();
@@ -316,7 +334,7 @@ async function main() {
       alertCliFailure("preflight", `refusing to run on authMethod=${pf.status.authMethod}; subscription login required`, log);
       return 1;
     }
-    log(`run start${DRY_RUN ? " (dry run)" : ""}: since=${SINCE} limit=${LIMIT || "none"} model=${DEFAULTS.model} preflight ${pf.detail}`);
+    log(`run start${DRY_RUN ? " (dry run)" : ""} via=${process.env.JOBSYNC_VIA || "direct"}: since=${SINCE} limit=${LIMIT || "none"} model=${DEFAULTS.model} preflight ${pf.detail}`);
 
     const classifier = createMailClassifier({ corrections: loadCorrections().corrections, log });
 
