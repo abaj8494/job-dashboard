@@ -249,8 +249,8 @@ async function scanCorrections(emails, classifier) {
         log(`${id} correction ${originalType} -> ${correctedType}; server delete queued`);
       } else {
         // The owner set the type; Claude only reads the details for it.
-        const r = await classifier.classify(msg.email, { tags: msg.tags, label: id, forceStage2: true });
-        const imp = server.toImport(msg.email, { ...(r || { confidence: 1, stage: null, extractedData: {} }), type: correctedType }, { ownerSet: true });
+        const r = await classifier.classify(msg.email, { tags: msg.tags, label: id, forceStage2: true, ownerType: correctedType });
+        const imp = server.toImport(msg.email, r || { type: correctedType, confidence: 1, stage: null, extractedData: {} }, { ownerSet: true });
         server.enqueue("correct", id, imp);
         await tagMessage(id, [], [SERVER_TAG]);
         log(`${id} correction ${originalType} -> ${correctedType}; server update queued${r ? "" : " (details not read)"}`);
@@ -338,15 +338,16 @@ async function main() {
         gone++;
         return;
       }
-      const r = await classifier.classify(msg.email, { tags: msg.tags, label: id });
-      if (!r) {
-        failed++;
-        return; // left untagged (or unsent); the next run retries
-      }
       // Refiling: the type is the tag the owner has already seen; Claude
       // supplies the company, title and location.
       const tagged = refiling.has(id) ? (msg.tags.find((t) => t.startsWith("jobsync/")) || "").slice("jobsync/".length) : null;
-      const result = tagged && server.JOB_TYPES.includes(tagged) ? { ...r, type: tagged } : r;
+      const ownerType = tagged && server.JOB_TYPES.includes(tagged) ? tagged : undefined;
+      const result = await classifier.classify(msg.email, { tags: msg.tags, label: id, ownerType });
+      if (!result) {
+        failed++;
+        return; // left untagged (or unsent); the next run retries
+      }
+      const r = result;
       counts[result.type]++;
       stages[r.stage]++;
 
@@ -362,7 +363,7 @@ async function main() {
         }
       }
       if (!DRY_RUN && !tagged) await tagMessage(id, [`jobsync/${result.type}`]);
-      log(`${id} -> ${result.type}${tagged && tagged !== r.type ? ` (classifier said ${r.type})` : ""} stage=${r.stage} src=${r.source} conf=${r.confidence.toFixed(2)}${serverNote}`);
+      log(`${id} -> ${result.type}${ownerType ? " (tag kept)" : ""} stage=${r.stage} src=${r.source} conf=${r.confidence.toFixed(2)}${serverNote}`);
     });
 
     let sent = "server off";

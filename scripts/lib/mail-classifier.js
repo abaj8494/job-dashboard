@@ -233,14 +233,22 @@ function createMailClassifier(options = {}) {
     return parsed.data;
   }
 
+  /**
+   * opts.ownerType: the type the owner set (a correction) or already saw as a
+   * tag (--refile). It wins over Claude's category, and Claude's company,
+   * title and location are kept even if Claude itself would say "other".
+   */
   async function classify(email, opts = {}) {
     const label = opts.label || String(email.messageId || "").slice(0, 80);
+    const ownerType = CLASSIFICATION_TYPES.includes(opts.ownerType) ? opts.ownerType : null;
 
-    const pre = prefilter(email, opts.tags || []);
+    let pre = prefilter(email, opts.tags || []);
+    // An owner-typed job mail is never short-circuited to "other" by the local rules.
+    if (ownerType && ownerType !== "other" && pre && pre.type === "other") pre = null;
     if (pre && (pre.type !== "job_application" || (present(pre.extractedData.company) && present(pre.extractedData.jobTitle)))) {
       totals.prefiltered++;
       return {
-        type: pre.type,
+        type: ownerType || pre.type,
         confidence: 1,
         stage: 0,
         source: pre.source,
@@ -282,11 +290,11 @@ function createMailClassifier(options = {}) {
       stage = 2;
     }
 
-    const type = CLASSIFICATION_TYPES.includes(final.category) ? final.category : "other";
+    const type = ownerType || (CLASSIFICATION_TYPES.includes(final.category) ? final.category : "other");
     const data = merged();
     return {
       type,
-      confidence: Math.max(0, Math.min(1, Number(final.confidence) || 0)),
+      confidence: ownerType ? 1 : Math.max(0, Math.min(1, Number(final.confidence) || 0)),
       stage,
       source: ruleApplication ? `${pre.source}+claude` : "claude",
       extractedData:

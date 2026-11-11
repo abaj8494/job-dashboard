@@ -146,6 +146,22 @@ describe("staging", () => {
     expect(r.extractedData).toMatchObject({ company: "Canva", jobTitle: "Data Engineer" });
   });
 
+  test("an owner-set type wins and keeps Claude's details even when Claude says other", async () => {
+    const { c, calls } = classifier([s1({ category: "other", confidence: 0.9 }), s2({ category: "other", confidence: 0.9, company: "Acme", jobTitle: "Analyst" })]);
+    const r = await c.classify(mail(), { ownerType: "rejection", forceStage2: true });
+    expect(r).toMatchObject({ type: "rejection", confidence: 1 });
+    expect(r.extractedData).toMatchObject({ company: "Acme", jobTitle: "Analyst" });
+    expect(server.toImport(mail(), r, { ownerSet: true })).toMatchObject({ classification: "rejection", reviewRequired: false, extractedData: { company: "Acme", jobTitle: "Analyst" } });
+    expect(calls).toHaveLength(2);
+  });
+
+  test("an owner-set job type is not short-circuited to other by the local rules", async () => {
+    const { c, calls } = classifier([s1({ category: "other", confidence: 0.95, company: "Acme", jobTitle: "Analyst" })]);
+    const r = await c.classify(mail(), { tags: ["Finance"], ownerType: "interview" });
+    expect(calls).toHaveLength(1);
+    expect(r).toMatchObject({ type: "interview", stage: 1, extractedData: { company: "Acme" } });
+  });
+
   test("other never carries extracted details", async () => {
     const { c } = classifier([s1({ category: "other", confidence: 0.99, company: "Acme" })]);
     const r = await c.classify(mail());
