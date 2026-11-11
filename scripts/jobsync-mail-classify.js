@@ -408,7 +408,7 @@ async function main() {
   }
 }
 
-if (require.main === module) {
+function cli() {
   main()
     .then((code) => process.exit(code))
     .catch((e) => {
@@ -418,4 +418,6 @@ if (require.main === module) {
     });
 }
 
-module.exports = { unclassifiedQuery, unsentJobQuery, baseQuery, monitoredEmails, acquireLock, releaseLock };
+if (require.main === module) cli();
+
+module.exports = { cli, unclassifiedQuery, unsentJobQuery, baseQuery, monitoredEmails, acquireLock, releaseLock };
