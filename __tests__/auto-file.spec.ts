@@ -1,13 +1,13 @@
 /**
  * @jest-environment node
  */
-import { autoFileImport, findJob } from "@/lib/email/auto-file";
+import { applyOwnerCorrection, autoFileImport, findJob } from "@/lib/email/auto-file";
 
 type Fn = jest.Mock;
 
 function makeDb() {
   const db = {
-    job: { findMany: jest.fn() as Fn, update: jest.fn() as Fn, create: jest.fn() as Fn },
+    job: { findMany: jest.fn() as Fn, findUnique: jest.fn() as Fn, update: jest.fn() as Fn, create: jest.fn() as Fn },
     jobStatus: { findUnique: jest.fn() as Fn },
     company: { findUnique: jest.fn() as Fn, create: jest.fn() as Fn },
     jobTitle: { findUnique: jest.fn() as Fn, create: jest.fn() as Fn },
@@ -211,5 +211,43 @@ describe("findJob", () => {
     db.job.findMany.mockResolvedValue([existingJob({ JobTitle: { label: "Senior Data Analyst" } })]);
     expect((await findJob(db as never, "u1", "Acme", "Data Analyst"))?.id).toBe("job-1");
     expect(await findJob(db as never, "u1", "Acme", "Data Analyst", { exact: true })).toBeNull();
+  });
+});
+
+describe("applyOwnerCorrection", () => {
+  const date = new Date("2026-11-03T00:00:00Z");
+  const job = (status: string, over: Record<string, unknown> = {}) => ({ id: "job-1", applied: true, appliedDate: new Date("2026-10-01T00:00:00Z"), Status: { value: status }, ...over });
+
+  test("interview -> rejection rejects the job", async () => {
+    const db = makeDb();
+    db.job.findUnique.mockResolvedValue(job("interview"));
+    const r = await applyOwnerCorrection(db as never, "job-1", "rejection", date);
+    expect(r.changed).toBe(true);
+    expect(db.job.update).toHaveBeenCalledWith({ where: { id: "job-1" }, data: { Status: { connect: { id: "status-rejected" } } } });
+  });
+
+  test("the owner may move a status backwards: rejection -> interview", async () => {
+    const db = makeDb();
+    db.job.findUnique.mockResolvedValue(job("rejected"));
+    await applyOwnerCorrection(db as never, "job-1", "interview", date);
+    expect(db.job.update).toHaveBeenCalledWith({ where: { id: "job-1" }, data: { Status: { connect: { id: "status-interview" } } } });
+  });
+
+  test("a correction to an application dates an undated job; follow_up leaves the status alone", async () => {
+    const db = makeDb();
+    db.job.findUnique.mockResolvedValue(job("rejected", { appliedDate: null }));
+    await applyOwnerCorrection(db as never, "job-1", "job_application", date);
+    expect(db.job.update).toHaveBeenCalledWith({ where: { id: "job-1" }, data: { Status: { connect: { id: "status-applied" } }, applied: true, appliedDate: date } });
+
+    const db2 = makeDb();
+    db2.job.findUnique.mockResolvedValue(job("interview"));
+    expect((await applyOwnerCorrection(db2 as never, "job-1", "follow_up", date)).changed).toBe(false);
+    expect(db2.job.update).not.toHaveBeenCalled();
+  });
+
+  test("a missing job changes nothing", async () => {
+    const db = makeDb();
+    db.job.findUnique.mockResolvedValue(null);
+    expect(await applyOwnerCorrection(db as never, "gone", "rejection", date)).toMatchObject({ changed: false });
   });
 });

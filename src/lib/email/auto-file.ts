@@ -288,3 +288,39 @@ export async function findJob(db: Db, userId: string, company: string, title: st
     null
   );
 }
+
+export interface OwnerCorrectionOutcome {
+  changed: boolean;
+  note: string;
+}
+
+/**
+ * The owner retagged mail that is already filed to a job (for example a
+ * response to a rejection). Unlike automatic filing this may move the status
+ * backwards: it is the owner's explicit call. follow_up and other leave the
+ * status alone (other is handled by deleting the import). An application or
+ * response also marks the job applied, dated by the mail if it has no date.
+ */
+export async function applyOwnerCorrection(
+  db: Db,
+  jobId: string,
+  classification: string,
+  emailDate: Date
+): Promise<OwnerCorrectionOutcome> {
+  const job = await db.job.findUnique({ where: { id: jobId }, include: { Status: true } });
+  if (!job) return { changed: false, note: "owner correction: job not found" };
+
+  const data: Prisma.JobUpdateInput = {};
+  const target = STATUS_FOR_CLASSIFICATION[classification] ?? null;
+  if (target && job.Status?.value !== target) {
+    const status = await db.jobStatus.findUnique({ where: { value: target } });
+    if (status) data.Status = { connect: { id: status.id } };
+  }
+  if ((classification === "job_application" || classification === "job_response") && (!job.applied || !job.appliedDate)) {
+    data.applied = true;
+    if (!job.appliedDate) data.appliedDate = emailDate;
+  }
+  if (Object.keys(data).length === 0) return { changed: false, note: `owner correction to ${classification}: job unchanged` };
+  await db.job.update({ where: { id: jobId }, data });
+  return { changed: true, note: `owner correction to ${classification}${data.Status ? `: status ${job.Status?.value || "none"} -> ${target}` : ""}` };
+}

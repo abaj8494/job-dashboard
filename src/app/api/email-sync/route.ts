@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/db";
-import { autoFileImport, type ImportExtractedData } from "@/lib/email/auto-file";
+import { applyOwnerCorrection, autoFileImport, type ImportExtractedData } from "@/lib/email/auto-file";
 
 const API_KEY = process.env.EMAIL_SYNC_API_KEY;
 const MONITORED_EMAILS = (
@@ -299,6 +299,8 @@ export const PATCH = async (req: NextRequest) => {
       classification?: string;
       confidence?: number;
       reviewRequired?: boolean;
+      /** The owner retagged this mail; an already-filed import moves its job's status (backwards too). */
+      ownerCorrection?: boolean;
       classificationStage?: number | null;
       classificationReason?: string | null;
     }> | undefined;
@@ -315,6 +317,7 @@ export const PATCH = async (req: NextRequest) => {
     let updated = 0;
     let notFound = 0;
     let filed = 0;
+    let corrected = 0;
     const errors: string[] = [];
     const notFoundMessageIds: string[] = [];
     const failedMessageIds: string[] = [];
@@ -426,6 +429,10 @@ export const PATCH = async (req: NextRequest) => {
                 reviewedAt = new Date();
                 filed++;
               }
+            } else if (update.ownerCorrection === true && emailImport.status === "approved" && emailImport.jobId && classification !== emailImport.classification) {
+              const outcome = await applyOwnerCorrection(tx, emailImport.jobId, classification, emailImport.emailDate);
+              mergedData.ownerCorrectionNote = outcome.note;
+              if (outcome.changed) corrected++;
             }
 
             await tx.emailImport.update({
@@ -459,6 +466,7 @@ export const PATCH = async (req: NextRequest) => {
       updated,
       notFound,
       filed,
+      corrected,
       notFoundMessageIds,
       failedMessageIds,
       errors: errors.length > 0 ? errors : undefined,
