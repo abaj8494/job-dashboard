@@ -12,8 +12,8 @@ const {
   createMailClassifier,
   EXCERPT_CHARS,
 } = require("../scripts/lib/mail-classifier");
-const feed = require("../scripts/lib/jobs-feed");
-const { unclassifiedQuery } = require("../scripts/jobsync-mail-classify");
+const server = require("../scripts/lib/server-sync");
+const { unclassifiedQuery, unsentJobQuery } = require("../scripts/jobsync-mail-classify");
 
 const BODY_MARKER = "ZZBODYMARKERZZ";
 
@@ -167,44 +167,106 @@ describe("staging", () => {
   });
 });
 
-describe("jobs feed", () => {
+describe("server sync", () => {
   let dir;
   let file;
   beforeEach(() => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), "jobsync-feed-"));
-    file = path.join(dir, "jobs-feed.json");
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "jobsync-outbox-"));
+    file = path.join(dir, "server-outbox.json");
   });
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-  test("ids are stable per Message-ID, with or without angle brackets", () => {
-    expect(feed.feedIdFor("<a@b>")).toBe(feed.feedIdFor("a@b"));
-    expect(feed.feedIdFor("a@b")).not.toBe(feed.feedIdFor("c@d"));
-    expect(feed.feedIdFor("a@b")).toMatch(/^mail-[0-9a-f]{16}$/);
+  const result = (o = {}) => ({ type: "rejection", confidence: 0.9, stage: 1, extractedData: { company: "Acme", jobTitle: "Analyst", location: null, advertised: null }, ...o });
+
+  test("an import carries extracted fields only: no subject, sender or body", () => {
+    const imp = server.toImport(mail({ messageId: "<abc@x>" }), result());
+    expect(imp).toEqual({
+      messageId: "abc@x",
+      emailDate: "2026-11-02T23:30:00.000Z",
+      classification: "rejection",
+      confidence: 0.9,
+      isOutbound: false,
+      reviewRequired: false,
+      extractedData: { company: "Acme", jobTitle: "Analyst", location: null },
+      classifier: "claude",
+      classificationStage: 1,
+    });
+    const wire = JSON.stringify(imp);
+    for (const leak of [BODY_MARKER, "Your application", "talent@acme.com", "Acme Talent", "owner@example.com"]) expect(wire).not.toContain(leak);
   });
 
-  test("feedItem uses the local mail date and defaults advertised to true", () => {
-    const item = feed.feedItem(mail(), { company: "Acme", jobTitle: "Analyst", location: null, advertised: null });
-    expect(item).toMatchObject({ title: "Analyst", company: "Acme", location: "", advertised: true });
-    expect(item.date).toBe(feed.localDate(new Date("2026-11-02T23:30:00Z")));
-    expect(feed.feedItem(mail(), { company: null, jobTitle: null })).toBeNull();
+  test("other is never sent; below the threshold asks for review unless the owner set the type", () => {
+    expect(server.toImport(mail(), result({ type: "other" }))).toBeNull();
+    expect(server.toImport(mail(), result({ confidence: 0.5 }), { threshold: 0.8 }).reviewRequired).toBe(true);
+    expect(server.toImport(mail(), result({ confidence: 0.5 }), { threshold: 0.8, ownerSet: true }).reviewRequired).toBe(false);
   });
 
-  test("adding the same message twice makes one job; remove takes it out", () => {
-    const item = feed.feedItem(mail(), { company: "Acme", jobTitle: "Analyst" });
-    expect(feed.addToFeed([item], file)).toBe(1);
-    expect(feed.addToFeed([item], file)).toBe(0);
-    const saved = JSON.parse(fs.readFileSync(file, "utf8"));
-    expect(saved.version).toBe(1);
-    expect(saved.jobs).toHaveLength(1);
-    expect(feed.removeFromFeed("<abc123@mail.example>", file)).toBe(1);
-    expect(feed.loadFeed(file).jobs).toHaveLength(0);
-    expect(fs.readdirSync(dir)).toEqual(["jobs-feed.json"]);
+  test("config: env or ~/.jobsync/config, root or full URL, https only except localhost", () => {
+    const cfgFile = path.join(dir, "config");
+    fs.writeFileSync(cfgFile, 'export JOBSYNC_API_KEY="k1"\nexport JOBSYNC_API_URL="https://jobs.example/api/email-sync"\nexport OTHER=x\n');
+    expect(server.loadServerConfig({ env: {}, configFile: cfgFile })).toMatchObject({ ok: true, url: "https://jobs.example/api/email-sync", origin: "https://jobs.example", key: "k1" });
+    expect(server.loadServerConfig({ env: { JOBSYNC_API_URL: "http://localhost:3000", JOBSYNC_API_KEY: "k" } }).url).toBe("http://localhost:3000/api/email-sync");
+    expect(server.loadServerConfig({ env: { JOBSYNC_API_URL: "http://jobs.example", JOBSYNC_API_KEY: "k" } }).ok).toBe(false);
+    expect(server.loadServerConfig({ env: {}, configFile: path.join(dir, "none") }).ok).toBe(false);
   });
 
-  test("a missing feed is empty; a corrupt feed is an error, not silently replaced", () => {
-    expect(feed.loadFeed(file).jobs).toEqual([]);
+  function fakeServer(handler) {
+    const calls = [];
+    const fetchImpl = jest.fn(async (url, init) => {
+      const body = init.body ? JSON.parse(init.body) : null;
+      calls.push({ url, method: init.method, body, key: init.headers["x-api-key"] });
+      const [status, json] = handler({ url, method: init.method, body });
+      return { status, ok: status < 400, json: async () => json };
+    });
+    return { fetchImpl, calls };
+  }
+  const cfg = { url: "https://jobs.example/api/email-sync", key: "k" };
+
+  test("confirmed imports leave the outbox and are reported; server failures stay queued", async () => {
+    server.enqueue("import", "a@x", server.toImport(mail({ messageId: "a@x" }), result()), file);
+    server.enqueue("import", "b@x", server.toImport(mail({ messageId: "b@x" }), result()), file);
+    server.enqueue("import", "a@x", server.toImport(mail({ messageId: "a@x" }), result({ type: "interview" })), file);
+    expect(server.loadOutbox(file).items).toHaveLength(2);
+
+    const { fetchImpl, calls } = fakeServer(() => [200, { processed: 1, filed: 1, pending: 0, failedMessageIds: ["b@x"] }]);
+    const sent = [];
+    const r = await server.flush(cfg, { fetchImpl, file, onSent: async (i) => sent.push(i.messageId) });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ method: "POST", key: "k" });
+    expect(calls[0].body.imports.map((i) => i.classification).sort()).toEqual(["interview", "rejection"]);
+    expect(r).toMatchObject({ sent: 1, filed: 1, failed: 1 });
+    expect(sent).toEqual(["a@x"]);
+    expect(server.loadOutbox(file).items.map((i) => [i.messageId, i.attempts])).toEqual([["b@x", 1]]);
+  });
+
+  test("no confirmation (auth error, outage, network) keeps everything", async () => {
+    server.enqueue("import", "a@x", server.toImport(mail(), result()), file);
+    const down = fakeServer(() => [401, { error: "Unauthorized" }]);
+    expect(await server.flush(cfg, { fetchImpl: down.fetchImpl, file })).toMatchObject({ sent: 0, error: "POST 401 Unauthorized" });
+    const offline = jest.fn(async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+    });
+    expect(await server.flush(cfg, { fetchImpl: offline, file })).toMatchObject({ sent: 0, error: "ECONNREFUSED" });
+    expect(server.loadOutbox(file).items).toHaveLength(1);
+  });
+
+  test("a correction is posted and then patched; a delete is sent by messageId", async () => {
+    server.enqueue("correct", "c@x", server.toImport(mail({ messageId: "c@x" }), result({ type: "offer" }), { ownerSet: true }), file);
+    server.enqueue("delete", "d@x", null, file);
+    const { fetchImpl, calls } = fakeServer(({ method }) =>
+      method === "POST" ? [200, { processed: 0, filed: 0, pending: 0 }] : method === "PATCH" ? [200, { updated: 1, filed: 1 }] : [200, { deleted: 0, kept: true }]
+    );
+    const r = await server.flush(cfg, { fetchImpl, file });
+    expect(calls.map((c) => c.method)).toEqual(["POST", "PATCH", "DELETE"]);
+    expect(calls[1].body.updates[0]).toMatchObject({ messageId: "c@x", classification: "offer", reviewRequired: false });
+    expect(calls[2].url).toBe("https://jobs.example/api/email-sync?messageId=d%40x");
+    expect(r).toMatchObject({ sent: 2, filed: 1, kept: 1 });
+    expect(server.loadOutbox(file).items).toEqual([]);
+  });
+
+  test("a corrupt outbox is an error, not silently emptied", () => {
     fs.writeFileSync(file, "{oops");
-    expect(() => feed.addToFeed([feed.feedItem(mail(), { company: "A", jobTitle: "B" })], file)).toThrow(/cannot read feed/);
+    expect(() => server.enqueue("delete", "x", null, file)).toThrow();
     expect(fs.readFileSync(file, "utf8")).toBe("{oops");
   });
 });
@@ -218,5 +280,13 @@ describe("query", () => {
     for (const t of ["job_application", "job_response", "interview", "rejection", "offer", "follow_up", "other"]) {
       expect(q).toContain(`tag:jobsync/${t}`);
     }
+  });
+
+  test("refile query finds job mail not yet sent to the server", () => {
+    const q = unsentJobQuery(["a@x"], "2026-10-09");
+    expect(q).toContain("date:2026-10-09..");
+    expect(q).toContain("tag:jobsync/rejection");
+    expect(q).not.toContain("tag:jobsync/other");
+    expect(q).toContain("NOT tag:jobsync-server");
   });
 });

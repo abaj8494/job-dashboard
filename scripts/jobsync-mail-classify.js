@@ -3,22 +3,27 @@
  * jobsync mail classifier (server-free).
  *
  * Tags monitored mail with jobsync/<type> (job_application, job_response,
- * interview, rejection, offer, follow_up, other) and appends each job
- * application to ~/.jobsync/jobs-feed.json for the Chrome extension.
+ * interview, rejection, offer, follow_up, other) and sends each job-related
+ * result to jobs.abaj.ai, which files it with no review step: it creates the
+ * job or links to it, dated by the mail, and moves its status forward
+ * (scripts/lib/server-sync.js). Sent mail gets the jobsync-server tag.
  * Owner corrections (jobsync-was/<original> tags, set by the Emacs helpers)
- * are recorded for few-shot learning and keep the feed in step.
+ * are recorded for few-shot learning and sent to the server too.
  *
  * Classification: scripts/lib/mail-classifier.js (local prefilter, then
  * Claude on headers only, then a short redacted excerpt only when needed),
  * via the headless Claude Code CLI on the owner's subscription.
  *
  * Privacy: the log holds message ids, labels, stages and cost, never subjects,
- * senders or body text. Nothing is sent anywhere except the Claude calls.
+ * senders or body text. The server gets extracted fields only (company,
+ * title, location, type, confidence, mail date, messageId).
  *
  * Usage:
- *   node scripts/jobsync-mail-classify.js [--dry-run] [--since YYYY-MM-DD] [--limit N]
+ *   node scripts/jobsync-mail-classify.js [--dry-run] [--refile] [--since YYYY-MM-DD] [--limit N]
  *
- *   --dry-run  classify and print labels; no tags, no feed, no corrections
+ *   --dry-run  classify and print labels; no tags, no server, no corrections
+ *   --refile   also re-classify job mail tagged before the server step existed
+ *              (jobsync/<job type> without jobsync-server) and send it
  *   --since    oldest mail date to consider (default JOBSYNC_SINCE or 2026-10-09)
  *   --limit    most messages per run (default JOBSYNC_MAX_PER_RUN or 100; 0 = all)
  *
@@ -35,7 +40,7 @@ const { simpleParser } = require("mailparser");
 const { CLASSIFICATION_TYPES, htmlToText } = require("./lib/classification-rules");
 const { preflight, alertCliFailure, DEFAULTS } = require("./lib/claude-classifier");
 const { createMailClassifier } = require("./lib/mail-classifier");
-const feed = require("./lib/jobs-feed");
+const server = require("./lib/server-sync");
 
 const execFileAsync = promisify(execFile);
 
@@ -57,6 +62,8 @@ function argValue(name, fallback) {
 }
 
 const DRY_RUN = process.argv.includes("--dry-run");
+const REFILE = process.argv.includes("--refile");
+const SERVER_TAG = "jobsync-server";
 const SINCE = argValue("--since", process.env.JOBSYNC_SINCE || "2026-10-09");
 const LIMIT = parseInt(argValue("--limit", process.env.JOBSYNC_MAX_PER_RUN || "100"), 10);
 
@@ -147,6 +154,12 @@ function unclassifiedQuery(emails, since) {
   return `date:${since}.. AND ${baseQuery(emails)} AND NOT (${classified})`;
 }
 
+/** Job mail tagged before it was sent to the server (catch-up with --refile). */
+function unsentJobQuery(emails, since) {
+  const job = server.JOB_TYPES.map((t) => `tag:jobsync/${t}`).join(" OR ");
+  return `date:${since}.. AND ${baseQuery(emails)} AND (${job}) AND NOT tag:${SERVER_TAG}`;
+}
+
 async function messageIds(query) {
   return lines(await notmuch(["search", "--output=messages", "--sort=oldest-first", query])).map((id) => id.replace(/^id:/, ""));
 }
@@ -231,16 +244,16 @@ async function scanCorrections(emails, classifier) {
       });
       recorded++;
 
-      if (originalType === "job_application") {
-        const n = feed.removeFromFeed(id);
-        log(`${id} correction ${originalType} -> ${correctedType}; feed removed ${n}`);
-      } else if (correctedType === "job_application") {
-        const r = await classifier.classify(msg.email, { tags: msg.tags, label: id, forceStage2: true });
-        const item = r && feed.feedItem(msg.email, r.extractedData);
-        const n = item ? feed.addToFeed([item]) : 0;
-        log(`${id} correction ${originalType} -> ${correctedType}; feed added ${n}${item ? "" : " (no title or company found)"}`);
+      if (correctedType === "other") {
+        server.enqueue("delete", id);
+        log(`${id} correction ${originalType} -> ${correctedType}; server delete queued`);
       } else {
-        log(`${id} correction ${originalType} -> ${correctedType}`);
+        // The owner set the type; Claude only reads the details for it.
+        const r = await classifier.classify(msg.email, { tags: msg.tags, label: id, forceStage2: true });
+        const imp = server.toImport(msg.email, { ...(r || { confidence: 1, stage: null, extractedData: {} }), type: correctedType }, { ownerSet: true });
+        server.enqueue("correct", id, imp);
+        await tagMessage(id, [], [SERVER_TAG]);
+        log(`${id} correction ${originalType} -> ${correctedType}; server update queued${r ? "" : " (details not read)"}`);
       }
     }
     await tagMessage(id, [], [`jobsync-was/${originalType}`, "jobsync-corrected"]);
@@ -306,15 +319,18 @@ async function main() {
     let ids = await messageIds(unclassifiedQuery(emails, SINCE));
     const pending = ids.length;
     if (LIMIT > 0) ids = ids.slice(0, LIMIT);
-    log(`${pending} unclassified message(s); processing ${ids.length}`);
+    const refileIds = REFILE ? (await messageIds(unsentJobQuery(emails, SINCE))).filter((id) => !ids.includes(id)) : [];
+    log(`${pending} unclassified message(s); processing ${ids.length}${REFILE ? `; refiling ${refileIds.length}` : ""}`);
 
     const counts = Object.fromEntries(CLASSIFICATION_TYPES.map((t) => [t, 0]));
     let failed = 0;
     let gone = 0;
-    let feedAdded = 0;
+    let queued = 0;
     const stages = { 0: 0, 1: 0, 2: 0 };
+    const threshold = classifier.config.threshold;
+    const refiling = new Set(refileIds);
 
-    await mapLimit(ids, CONCURRENCY, async (id) => {
+    await mapLimit([...ids, ...refileIds], CONCURRENCY, async (id) => {
       const msg = await readMessage(id, emails);
       if (!msg) {
         // Removed from the index since the query (moved, trashed or deleted by a sync).
@@ -325,39 +341,54 @@ async function main() {
       const r = await classifier.classify(msg.email, { tags: msg.tags, label: id });
       if (!r) {
         failed++;
-        return; // left untagged; the next run retries
+        return; // left untagged (or unsent); the next run retries
       }
-      counts[r.type]++;
+      // Refiling: the type is the tag the owner has already seen; Claude
+      // supplies the company, title and location.
+      const tagged = refiling.has(id) ? (msg.tags.find((t) => t.startsWith("jobsync/")) || "").slice("jobsync/".length) : null;
+      const result = tagged && server.JOB_TYPES.includes(tagged) ? { ...r, type: tagged } : r;
+      counts[result.type]++;
       stages[r.stage]++;
 
-      let feedNote = "";
-      if (r.type === "job_application") {
-        const item = feed.feedItem(msg.email, r.extractedData);
-        if (!item) {
-          feedNote = " feed=none(no title or company)";
-        } else if (DRY_RUN) {
-          feedNote = ` feed=${item.id}(dry)`;
+      let serverNote = "";
+      const imp = server.toImport(msg.email, result, { threshold });
+      if (imp) {
+        serverNote = ` server=${imp.reviewRequired ? "review" : "file"}${imp.extractedData.company && imp.extractedData.jobTitle ? "" : "(partial)"}`;
+        if (DRY_RUN) {
+          serverNote += "(dry)";
         } else {
-          const n = feed.addToFeed([item]);
-          feedAdded += n;
-          feedNote = ` feed=${item.id}${n ? "+" : "(exists)"}`;
+          server.enqueue("import", id, imp);
+          queued++;
         }
       }
-      if (!DRY_RUN) await tagMessage(id, [`jobsync/${r.type}`]);
-      log(`${id} -> ${r.type} stage=${r.stage} src=${r.source} conf=${r.confidence.toFixed(2)}${feedNote}`);
+      if (!DRY_RUN && !tagged) await tagMessage(id, [`jobsync/${result.type}`]);
+      log(`${id} -> ${result.type}${tagged && tagged !== r.type ? ` (classifier said ${r.type})` : ""} stage=${r.stage} src=${r.source} conf=${r.confidence.toFixed(2)}${serverNote}`);
     });
 
+    let sent = "server off";
+    if (!DRY_RUN) {
+      const cfg = server.loadServerConfig();
+      if (!cfg.ok) {
+        sent = `server not configured (${cfg.reason}); ${server.loadOutbox().items.length} queued`;
+      } else {
+        const f = await server.flush(cfg, { log, onSent: (item) => tagMessage(item.messageId, [SERVER_TAG]) });
+        const left = server.loadOutbox().items.length;
+        sent = `server sent=${f.sent} filed=${f.filed} pending=${f.pending}${f.kept ? ` kept=${f.kept}` : ""}${left ? ` queued=${left}` : ""}${f.error ? ` error=${f.error}` : ""}`;
+      }
+    }
+
     const t = classifier.totals;
+    const total = ids.length + refileIds.length;
     const summary =
-      `run done: ${ids.length} processed, ${failed} failed (left for retry), ${gone} gone, ` +
+      `run done: ${total} processed, ${failed} failed (left for retry), ${gone} gone, ` +
       `${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(" ")} | ` +
-      `stage0=${stages[0]} stage1=${stages[1]} stage2=${stages[2]} | feed +${feedAdded} | ` +
+      `stage0=${stages[0]} stage1=${stages[1]} stage2=${stages[2]} | queued +${queued} | ${sent} | ` +
       `claude calls=${t.calls} cost=$${t.cost.toFixed(4)} model_time=${(t.durationMs / 1000).toFixed(1)}s wall=${((Date.now() - started) / 1000).toFixed(1)}s` +
       `${pending > ids.length ? ` | ${pending - ids.length} left for later runs` : ""}`;
     log(summary);
     if (!process.stdout.isTTY && !DRY_RUN) console.log(summary);
     if (t.tripped) alertCliFailure("classification", "circuit breaker tripped", log);
-    return failed && failed === ids.length - gone ? 1 : 0;
+    return failed && failed === total - gone ? 1 : 0;
   } finally {
     releaseLock();
   }
@@ -373,4 +404,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { unclassifiedQuery, baseQuery, monitoredEmails, acquireLock, releaseLock };
+module.exports = { unclassifiedQuery, unsentJobQuery, baseQuery, monitoredEmails, acquireLock, releaseLock };
