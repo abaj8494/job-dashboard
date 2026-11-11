@@ -67,6 +67,15 @@ const SERVER_TAG = "jobsync-server";
 const SINCE = argValue("--since", process.env.JOBSYNC_SINCE || "2026-10-09");
 const LIMIT = parseInt(argValue("--limit", process.env.JOBSYNC_MAX_PER_RUN || "100"), 10);
 
+function notify(message) {
+  if (process.platform !== "darwin" || DRY_RUN) return;
+  try {
+    execFile("osascript", ["-e", `display notification ${JSON.stringify(message)} with title "JobSync"`], () => {});
+  } catch (e) {
+    // ignore
+  }
+}
+
 function log(message) {
   const line = `[${new Date().toISOString()}] ${message}`;
   try {
@@ -373,6 +382,10 @@ async function main() {
         sent = `server ${cfg.off ? "off" : "not configured"} (${cfg.reason}); ${server.loadOutbox().items.length} queued`;
       } else {
         const f = await server.flush(cfg, { log, onSent: (item) => tagMessage(item.messageId, [SERVER_TAG]) });
+        for (const id of f.keptIds) {
+          log(`${id} corrected to other but already filed to a job on the server; kept there: remove or fix that job on jobs.abaj.ai`);
+        }
+        if (f.keptIds.length) notify(`${f.keptIds.length} mail(s) you marked "other" are still filed to a job on jobs.abaj.ai. Fix the job there.`);
         const left = server.loadOutbox().items.length;
         sent = `server sent=${f.sent} filed=${f.filed} pending=${f.pending}${f.kept ? ` kept=${f.kept}` : ""}${left ? ` queued=${left}` : ""}${f.error ? ` error=${f.error}` : ""}`;
       }

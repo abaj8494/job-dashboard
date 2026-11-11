@@ -284,7 +284,7 @@ describe("server sync", () => {
     expect(calls.map((c) => c.method)).toEqual(["POST", "PATCH", "DELETE"]);
     expect(calls[1].body.updates[0]).toMatchObject({ messageId: "c@x", classification: "offer", reviewRequired: false });
     expect(calls[2].url).toBe("https://jobs.example/api/email-sync?messageId=d%40x");
-    expect(r).toMatchObject({ sent: 2, filed: 1, kept: 1 });
+    expect(r).toMatchObject({ sent: 2, filed: 1, kept: 1, keptIds: ["d@x"] });
     expect(server.loadOutbox(file).items).toEqual([]);
   });
 

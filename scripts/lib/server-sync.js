@@ -165,7 +165,7 @@ async function call(fetchImpl, cfg, method, url, body) {
  */
 async function flush(cfg, { fetchImpl = globalThis.fetch, file = DEFAULT_OUTBOX, onSent = async () => {}, log = () => {} } = {}) {
   const box = loadOutbox(file);
-  const out = { sent: 0, filed: 0, pending: 0, kept: 0, failed: 0, error: null };
+  const out = { sent: 0, filed: 0, pending: 0, kept: 0, keptIds: [], failed: 0, error: null };
   if (!box.items.length) return out;
 
   const done = new Set();
@@ -225,7 +225,11 @@ async function flush(cfg, { fetchImpl = globalThis.fetch, file = DEFAULT_OUTBOX,
     for (const item of box.items.filter((i) => i.op === "delete")) {
       const r = await call(fetchImpl, cfg, "DELETE", `${cfg.url}?messageId=${encodeURIComponent(item.messageId)}`);
       if (r.ok && r.json) {
-        if (r.json.kept) out.kept++;
+        if (r.json.kept) {
+          // Corrected to "other" but already filed to a job: the server keeps it.
+          out.kept++;
+          out.keptIds.push(item.messageId);
+        }
         done.add(item.messageId);
       } else {
         note(item, `DELETE ${r.status}`);
