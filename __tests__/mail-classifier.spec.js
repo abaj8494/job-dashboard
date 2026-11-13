@@ -63,6 +63,25 @@ describe("prefilter (stage 0, no Claude)", () => {
     expect(prefilter(mail({ from: "x@notnetflix.com" }))).toBeNull();
   });
 
+  test("UNSW senders, subdomains included, are other by rule with no Claude call", async () => {
+    expect(prefilter(mail({ from: "someone@unsw.edu.au" }))).toMatchObject({ type: "other", source: "skip-domain:unsw.edu.au" });
+    expect(prefilter(mail({ from: "noreply@student.unsw.edu.au" }))).toMatchObject({ type: "other", source: "skip-domain:unsw.edu.au" });
+    expect(prefilter(mail({ from: "x@notunsw.edu.au" }))).toBeNull();
+    expect(prefilter(mail({ from: "owner@unsw.edu.au", isOutbound: true }))).toBeNull();
+    const { c, calls } = classifier([]);
+    const r = await c.classify(mail({ from: "careers@unsw.edu.au", subject: "Your application" }));
+    expect(r).toMatchObject({ type: "other", stage: 0 });
+    expect(calls).toHaveLength(0);
+    expect(server.toImport(mail(), r)).toBeNull();
+  });
+
+  test("an owner correction still overrides the UNSW rule", async () => {
+    const { c, calls } = classifier([s1({ category: "job_response", confidence: 0.9, company: "UNSW", jobTitle: "Research Assistant" })]);
+    const r = await c.classify(mail({ from: "hr@unsw.edu.au" }), { ownerType: "job_response" });
+    expect(calls).toHaveLength(1);
+    expect(r).toMatchObject({ type: "job_response", extractedData: { company: "UNSW" } });
+  });
+
   test("outbound mail is never domain-filtered", () => {
     expect(prefilter(mail({ from: "owner@paypal.com", isOutbound: true }))).toBeNull();
   });

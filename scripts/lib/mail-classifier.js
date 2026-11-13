@@ -42,6 +42,14 @@ const NON_JOB_DOMAINS = [
   "github.com",
 ];
 
+/**
+ * Senders the owner asked not to spend classifier effort on (2026-11-13:
+ * "whoever emails me through UNSW"). Tagged other by rule from the From
+ * header, subdomains included; no Claude call, nothing sent to the server.
+ * An owner correction in Emacs still overrides it (classify ownerType).
+ */
+const SKIP_DOMAINS = ["unsw.edu.au"];
+
 // ---------------------------------------------------------------------------
 // Stage 0
 // ---------------------------------------------------------------------------
@@ -64,6 +72,9 @@ function prefilter(email, tags = []) {
   if (hit) return { type: "other", source: `tag:${hit}`, extractedData: {} };
 
   const domain = senderDomain(email);
+  if (!email.isOutbound && domain && domainMatches(domain, SKIP_DOMAINS)) {
+    return { type: "other", source: `skip-domain:${SKIP_DOMAINS.find((d) => domain === d || domain.endsWith(`.${d}`))}`, extractedData: {} };
+  }
   if (!email.isOutbound && domain && domainMatches(domain, NON_JOB_DOMAINS)) {
     return { type: "other", source: "sender-domain", extractedData: {} };
   }
@@ -321,6 +332,7 @@ function createMailClassifier(options = {}) {
 module.exports = {
   NON_JOB_TAGS,
   NON_JOB_DOMAINS,
+  SKIP_DOMAINS,
   EXCERPT_CHARS,
   prefilter,
   headerBlock,
