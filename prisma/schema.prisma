@@ -30,7 +30,6 @@ model User {
   Task         Task[]
   EmailAccount   EmailAccount[]
   EmailImport    EmailImport[]
-  DiscoveredJob  DiscoveredJob[]
 }
 
 model Profile {
@@ -352,25 +351,4 @@ model EmailImport {
   @@index([userId, status])
   @@index([userId, classification])
   @@index([emailDate])
-}
-
-model DiscoveredJob {
-  id          String    @id @default(uuid())
-  externalId  String
-  source      String    // adzuna, jooble
-  title       String
-  company     String
-  location    String
-  salary      String?
-  url         String?
-  description String?
-  postedDate  DateTime?
-  status      String    @default("new") // new, saved, hidden, applied
-  matchScore  Float?
-  createdAt   DateTime  @default(now())
-  userId      String
-  user        User      @relation(fields: [userId], references: [id])
-
-  @@unique([externalId, source])
-  @@index([userId, status])
 }
