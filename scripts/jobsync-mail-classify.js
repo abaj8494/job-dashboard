@@ -197,6 +197,7 @@ async function readMessage(id, emails) {
   const to = (Array.isArray(parsed.to) ? parsed.to[0] : parsed.to)?.value?.[0]?.address || "";
   return {
     tags,
+    hasDate: Boolean(parsed.date),
     email: {
       messageId: id,
       from,
@@ -402,7 +403,7 @@ async function main() {
       if (!DRY_RUN && !tagged) {
         await tagMessage(id, [`jobsync/${result.type}`]);
         const kind = sounds.soundKind(result.type);
-        if (kind && !REFILE && !NO_SOUND && sounds.isLive({ tags: msg.tags, date: msg.email.date, isOutbound: msg.email.isOutbound }, { maxAgeHours: soundCfg.maxAgeHours })) {
+        if (kind && !REFILE && !NO_SOUND && sounds.isLive({ tags: msg.tags, date: msg.hasDate ? msg.email.date : null, isOutbound: msg.email.isOutbound }, { maxAgeHours: soundCfg.maxAgeHours })) {
           live.push({ id, kind });
         }
       }

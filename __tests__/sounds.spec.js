@@ -49,15 +49,16 @@ describe("isLive", () => {
   it("honours maxAgeHours and rejects bad or far-future dates", () => {
     expect(sounds.isLive({ tags: LIVE_TAGS, date: hoursAgo(3) }, { now: NOW, maxAgeHours: 2 })).toBe(false);
     expect(sounds.isLive({ tags: LIVE_TAGS, date: "not a date" }, { now: NOW })).toBe(false);
+    expect(sounds.isLive({ tags: LIVE_TAGS, date: null }, { now: NOW })).toBe(false);
     expect(sounds.isLive({ tags: LIVE_TAGS, date: hoursAgo(-0.5) }, { now: NOW })).toBe(true);
     expect(sounds.isLive({ tags: LIVE_TAGS, date: hoursAgo(-2) }, { now: NOW })).toBe(false);
   });
 });
 
 describe("inQuietHours", () => {
-  it("wraps past midnight, inclusive", () => {
-    for (const h of [23, 0, 3, 8]) expect(sounds.inQuietHours(h, "23-8")).toBe(true);
-    for (const h of [9, 12, 22]) expect(sounds.inQuietHours(h, "23-8")).toBe(false);
+  it("wraps past midnight, inclusive: 23-7 is 23:00-07:59", () => {
+    for (const h of [23, 0, 3, 7]) expect(sounds.inQuietHours(h, "23-7")).toBe(true);
+    for (const h of [8, 12, 22]) expect(sounds.inQuietHours(h, "23-7")).toBe(false);
   });
   it("handles a same-day range and none", () => {
     expect(sounds.inQuietHours(13, "12-14")).toBe(true);
@@ -84,7 +85,7 @@ describe("loadSoundConfig", () => {
     expect(path.basename(c.sound.rejection)).toBe("Basso.aiff");
     expect(path.basename(c.sound.job)).toBe("Hero.aiff");
     expect(c.sound.rejection).not.toBe(c.sound.offer);
-    expect(c.quiet).toBe("23-8");
+    expect(c.quiet).toBe("23-7");
     expect(c.maxAgeHours).toBe(48);
   });
   it("reads JOBSYNC_SOUND* from the config file; the environment wins; off clears", () => {
@@ -132,6 +133,11 @@ describe("playForRun", () => {
     expect(r.kind).toBe("rejection");
     expect(spawnFn.calls[0].args.slice(-2)).toEqual(["/System/Library/Sounds/Basso.aiff", ""]);
   });
+  it("plays at 08:00 with the default quiet hours", () => {
+    const spawnFn = fakeSpawn();
+    const r = sounds.playForRun([{ id: "m", kind: "job" }], { config: config(), now: new Date(2026, 10, 18, 8, 0), spawnFn });
+    expect(r.played).toBe(true);
+  });
   it("is silent in quiet hours, when off, and with nothing live", () => {
     const spawnFn = fakeSpawn();
     const logs = [];
@@ -140,6 +146,6 @@ describe("playForRun", () => {
     expect(sounds.playForRun([{ id: "m", kind: "offer" }], { config: config({ env: { JOBSYNC_SOUNDS: "off" } }), now: NOW, spawnFn }).reason).toBe("off");
     expect(sounds.playForRun([], { config: config(), now: NOW, spawnFn }).played).toBe(false);
     expect(spawnFn.calls).toHaveLength(0);
-    expect(logs).toEqual(["sound offer for m skipped: quiet hours 23-8"]);
+    expect(logs).toEqual(["sound offer for m skipped: quiet hours 23-7"]);
   });
 });

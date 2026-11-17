@@ -15,7 +15,7 @@
  *   JOBSYNC_SOUNDS=off                  no sounds
  *   JOBSYNC_SOUND_OFFER / _REJECTION / _JOB    sound files
  *   JOBSYNC_SAY_OFFER / _REJECTION / _JOB      words spoken after the sound ("off" for none)
- *   JOBSYNC_SOUND_QUIET=23-8            quiet hours, local time, inclusive ("off" for none);
+ *   JOBSYNC_SOUND_QUIET=23-7            quiet hours, local time, whole hours inclusive (23:00-07:59; "off" for none);
  *                                       the same hours as the mail banners in the post-new hook
  *   JOBSYNC_SOUND_MAX_AGE_HOURS=48
  *
@@ -40,7 +40,7 @@ const DEFAULTS = {
     job: `${SYSTEM_SOUNDS}/Hero.aiff`,
   },
   say: { offer: "Job offer", rejection: "", job: "" },
-  quiet: "23-8",
+  quiet: "23-7",
   maxAgeHours: 48,
 };
 
@@ -93,12 +93,13 @@ function soundKind(type) {
 /**
  * Live new mail: unread, in the inbox, not trash/spam/sent, not from the
  * owner, and dated within maxAgeHours of now (a little in the future is fine:
- * sender clocks drift).
+ * sender clocks drift). Mail with no Date header is not live.
  */
 function isLive({ tags = [], date, isOutbound = false }, { now = new Date(), maxAgeHours = DEFAULTS.maxAgeHours } = {}) {
   const t = new Set(tags);
   if (!t.has("unread") || !t.has("inbox")) return false;
   if (["trash", "spam", "deleted", "sent"].some((x) => t.has(x)) || isOutbound) return false;
+  if (!date) return false;
   const ms = date instanceof Date ? date.getTime() : new Date(date).getTime();
   if (!Number.isFinite(ms)) return false;
   const age = now.getTime() - ms;
