@@ -26,8 +26,13 @@
  *              (the Emacs poll's foreground call uses this)
  *   --refile   also re-classify job mail tagged before the server step existed
  *              (jobsync/<job type> without jobsync-server) and send it
+ *   --no-sound no outcome sound for this run (refile and dry runs never play one)
  *   --since    oldest mail date to consider (default JOBSYNC_SINCE or 2026-10-09)
  *   --limit    most messages per run (default JOBSYNC_MAX_PER_RUN or 100; 0 = all)
+ *
+ * Sounds: when a run tags newly arrived job mail, it plays one sound for the
+ * most important (offer, then rejection, then other job mail); see
+ * scripts/lib/sounds.js for the rules and the ~/.jobsync/config settings.
  *
  * One run at a time: a lock in ~/.jobsync makes an overlapping run exit at once.
  */
@@ -43,6 +48,7 @@ const { CLASSIFICATION_TYPES, htmlToText } = require("./lib/classification-rules
 const { preflight, alertCliFailure, DEFAULTS } = require("./lib/claude-classifier");
 const { createMailClassifier } = require("./lib/mail-classifier");
 const server = require("./lib/server-sync");
+const sounds = require("./lib/sounds");
 
 const execFileAsync = promisify(execFile);
 
@@ -65,6 +71,7 @@ function argValue(name, fallback) {
 
 const DRY_RUN = process.argv.includes("--dry-run");
 const REFILE = process.argv.includes("--refile");
+const NO_SOUND = process.argv.includes("--no-sound");
 const SERVER_TAG = "jobsync-server";
 const SINCE = argValue("--since", process.env.JOBSYNC_SINCE || "2026-10-09");
 const LIMIT = parseInt(argValue("--limit", process.env.JOBSYNC_MAX_PER_RUN || "100"), 10);
@@ -356,6 +363,9 @@ async function main() {
     const stages = { 0: 0, 1: 0, 2: 0 };
     const threshold = classifier.config.threshold;
     const refiling = new Set(refileIds);
+    // Newly tagged live job mail, for the outcome sound (never on refile, dry or --no-sound runs).
+    const soundCfg = sounds.loadSoundConfig();
+    const live = [];
 
     await mapLimit([...ids, ...refileIds], CONCURRENCY, async (id) => {
       const msg = await readMessage(id, emails);
@@ -389,9 +399,18 @@ async function main() {
           queued++;
         }
       }
-      if (!DRY_RUN && !tagged) await tagMessage(id, [`jobsync/${result.type}`]);
+      if (!DRY_RUN && !tagged) {
+        await tagMessage(id, [`jobsync/${result.type}`]);
+        const kind = sounds.soundKind(result.type);
+        if (kind && !REFILE && !NO_SOUND && sounds.isLive({ tags: msg.tags, date: msg.email.date, isOutbound: msg.email.isOutbound }, { maxAgeHours: soundCfg.maxAgeHours })) {
+          live.push({ id, kind });
+        }
+      }
       log(`${id} -> ${result.type}${ownerType ? " (tag kept)" : ""} stage=${r.stage} src=${r.source} conf=${r.confidence.toFixed(2)}${serverNote}`);
     });
+
+    // Before the send to the server, so a slow or failing server does not delay it.
+    if (live.length) sounds.playForRun(live, { config: soundCfg, log });
 
     let sent = "server off";
     if (!DRY_RUN) {
