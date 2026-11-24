@@ -92,6 +92,56 @@ function titlesMatch(a: string, b: string): boolean {
   return containsWords(a, b) || containsWords(b, a);
 }
 
+/** Trailing words that do not tell two companies apart ("Prospex Recruiting" is "Prospex"). */
+const COMPANY_SUFFIXES = new Set([
+  "pty", "ltd", "limited", "inc", "incorporated", "llc", "plc", "co", "company", "corp", "corporation",
+  "group", "holdings", "recruiting", "recruitment", "careers", "talent",
+]);
+
+/** A company name without punctuation, a leading "the" or trailing suffix words. */
+export function companyCore(name: string): string {
+  const words = norm(name).replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean);
+  if (words[0] === "the" && words.length > 1) words.shift();
+  while (words.length > 1 && COMPANY_SUFFIXES.has(words[words.length - 1])) words.pop();
+  return words.join(" ");
+}
+
+/**
+ * Whether two company names are the same employer: the same core, or one
+ * core is the other's leading whole words ("Civica" and "Civica UK Ltd").
+ * A name in the middle or at the end never counts ("Energy Australia" is not
+ * "Origin Energy"), and "Canva" never matches "Canvas Co".
+ */
+export function companiesMatch(a: string, b: string): boolean {
+  const ca = companyCore(a);
+  const cb = companyCore(b);
+  if (!ca || !cb) return false;
+  return ca === cb || cb.startsWith(`${ca} `) || ca.startsWith(`${cb} `);
+}
+
+/**
+ * Jobs at a company spelled differently from the extracted name whose title
+ * also matches: the fallback when no job has the exact company name. More
+ * than one left after preferring an exact title is ambiguous.
+ */
+async function findLooseMatch(db: Db, userId: string, company: string, titleValue: string) {
+  const tokens = companyCore(company).split(" ").filter((t) => t.length >= 2);
+  if (tokens.length === 0 || !titleValue) return { match: null, ambiguous: 0 };
+  const loose = (
+    await db.job.findMany({
+      where: { userId, OR: tokens.map((t) => ({ Company: { value: { contains: t } } })) },
+      include: { JobTitle: true, Status: true, Company: true },
+      orderBy: { createdAt: "desc" },
+    })
+  ).filter(
+    (j) => companiesMatch(j.Company?.value || j.Company?.label || "", company) && titlesMatch(norm(j.JobTitle?.label), titleValue)
+  );
+  const exactTitle = loose.filter((j) => norm(j.JobTitle?.label) === titleValue);
+  const pool = exactTitle.length > 0 ? exactTitle : loose;
+  if (pool.length === 1) return { match: pool[0], ambiguous: 0 };
+  return { match: null, ambiguous: pool.length };
+}
+
 /**
  * Decide and apply the filing for one import. Must run inside the caller's
  * transaction together with the EmailImport create so a failure leaves nothing
@@ -116,8 +166,8 @@ export async function autoFileImport(
   const titleValue = norm(jobTitle);
 
   // ---- 1. Try to link to an existing job at this company --------------------
-  // Exact (case-insensitive) company name only: a substring match would file
-  // "Canva" mail against "Canvas Co". Unknown spellings go pending instead.
+  // Exact (case-insensitive) company name first; other spellings of the same
+  // employer are step 1b, which also needs the title to match.
   const candidates = await db.job.findMany({
     where: {
       userId,
@@ -145,6 +195,18 @@ export async function autoFileImport(
     }
   }
 
+  // ---- 1b. No job under this exact name: the same employer spelled another
+  // way ("Prospex" for "Prospex Recruiting"), only when the title matches too.
+  let looseNote = "";
+  if (!match && candidates.length === 0 && titleValue) {
+    const loose = await findLooseMatch(db, userId, company, titleValue);
+    if (loose.ambiguous > 1) return pending(`${loose.ambiguous} jobs at companies like ${company} with a matching title`);
+    if (loose.match) {
+      match = loose.match;
+      looseNote = ` (mail said ${company})`;
+    }
+  }
+
   const targetStatusValue = STATUS_FOR_CLASSIFICATION[imp.classification] ?? null;
   const isApplication = imp.classification === "job_application" || imp.classification === "job_response";
 
@@ -169,7 +231,7 @@ export async function autoFileImport(
       status: "approved",
       jobId: match.id,
       action: "linked",
-      note: `linked to ${match.Company?.label} / ${match.JobTitle?.label}${data.Status ? `, status -> ${targetStatusValue}` : ""}`,
+      note: `linked to ${match.Company?.label} / ${match.JobTitle?.label}${looseNote}${data.Status ? `, status -> ${targetStatusValue}` : ""}`,
     };
   }
 

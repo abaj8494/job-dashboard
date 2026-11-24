@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { applyOwnerCorrection, autoFileImport, findJob } from "@/lib/email/auto-file";
+import { applyOwnerCorrection, autoFileImport, companiesMatch, companyCore, findJob } from "@/lib/email/auto-file";
 
 type Fn = jest.Mock;
 
@@ -199,6 +199,94 @@ describe("autoFileImport", () => {
     const db = makeDb();
     await autoFileImport(db as never, "u1", { ...base, classification: "follow_up", extractedData: { company: "Canva", jobTitle: "Data Engineer" } });
     expect(db.job.create).toHaveBeenCalledWith({ data: expect.objectContaining({ applied: false, appliedDate: null, statusId: "status-applied" }) });
+  });
+});
+
+describe("loose company match", () => {
+  const prospex = (over: Record<string, unknown> = {}) =>
+    existingJob({
+      id: "job-prospex",
+      Company: { label: "Prospex Recruiting", value: "prospex recruiting" },
+      JobTitle: { label: "Graduate Integration Engineer" },
+      ...over,
+    });
+  // Exact lookup finds nothing; the loose lookup (an OR of contains) returns the given jobs.
+  const looseDb = (jobs: unknown[]) => {
+    const db = makeDb();
+    db.job.findMany.mockImplementation(async ({ where }: { where: Record<string, unknown> }) => (where.OR ? jobs : []));
+    return db;
+  };
+
+  test("companyCore and companiesMatch", () => {
+    expect(companyCore("Prospex Recruiting")).toBe("prospex");
+    expect(companyCore("The Acme Group Pty Ltd")).toBe("acme");
+    expect(companyCore("Group")).toBe("group");
+    expect(companiesMatch("Prospex", "Prospex Recruiting")).toBe(true);
+    expect(companiesMatch("Civica", "Civica UK Ltd")).toBe(true);
+    expect(companiesMatch("Z Software", "Z Software Pty Ltd")).toBe(true);
+    expect(companiesMatch("Atlassian", "Atlassian Australia")).toBe(true);
+    expect(companiesMatch("Canva", "Canvas Co")).toBe(false);
+    // A name inside or at the end of another is a different employer.
+    expect(companiesMatch("Energy Australia", "Origin Energy")).toBe(false);
+    expect(companiesMatch("Energy Australia", "Energy Queensland")).toBe(false);
+    expect(companiesMatch("Bank Australia", "Commonwealth Bank of Australia")).toBe(false);
+    expect(companiesMatch("Health Group", "Ramsay Health Care")).toBe(false);
+    expect(companiesMatch("Canva", "Canvas")).toBe(false);
+  });
+
+  test("a Prospex rejection lands on the Prospex Recruiting application", async () => {
+    const db = looseDb([prospex()]);
+    const r = await autoFileImport(db as never, "u1", {
+      ...base,
+      classification: "rejection",
+      extractedData: { company: "Prospex", jobTitle: "Graduate Integration Engineer" },
+    });
+    expect(r).toMatchObject({ status: "approved", jobId: "job-prospex", action: "linked" });
+    expect(r.note).toMatch(/mail said Prospex/);
+    expect(db.job.update).toHaveBeenCalledWith({ where: { id: "job-prospex" }, data: { Status: { connect: { id: "status-rejected" } } } });
+    expect(db.job.create).not.toHaveBeenCalled();
+  });
+
+  test("an application at Energy Australia never files under Origin Energy", async () => {
+    const db = looseDb([existingJob({ id: "job-origin", Company: { label: "Origin Energy", value: "origin energy" }, JobTitle: { label: "Graduate Engineer" } })]);
+    const r = await autoFileImport(db as never, "u1", { ...base, classification: "job_application", extractedData: { company: "Energy Australia", jobTitle: "Graduate Engineer" } });
+    expect(r.action).toBe("created");
+    expect(db.job.update).not.toHaveBeenCalled();
+  });
+
+  test("Canva mail never files against Canvas Co", async () => {
+    const db = looseDb([existingJob({ id: "job-canvas", Company: { label: "Canvas Co", value: "canvas co" }, JobTitle: { label: "Software Engineer" } })]);
+    const r = await autoFileImport(db as never, "u1", { ...base, classification: "rejection", extractedData: { company: "Canva", jobTitle: "Software Engineer" } });
+    expect(r.action).toBe("created");
+    expect(db.job.update).not.toHaveBeenCalled();
+  });
+
+  test("a similar company with a different title is a different job", async () => {
+    const db = looseDb([prospex({ JobTitle: { label: "Data Analyst" } })]);
+    const r = await autoFileImport(db as never, "u1", { ...base, classification: "rejection", extractedData: { company: "Prospex", jobTitle: "Graduate Integration Engineer" } });
+    expect(r.action).toBe("created");
+    expect(db.job.update).not.toHaveBeenCalled();
+  });
+
+  test("two candidates with different titles: the title picks one", async () => {
+    const db = looseDb([prospex({ id: "job-a", JobTitle: { label: "Data Analyst" } }), prospex({ id: "job-b" })]);
+    const r = await autoFileImport(db as never, "u1", { ...base, classification: "interview", extractedData: { company: "Prospex", jobTitle: "Graduate Integration Engineer" } });
+    expect(r).toMatchObject({ action: "linked", jobId: "job-b" });
+  });
+
+  test("two candidates that both match the title stay pending", async () => {
+    const db = looseDb([prospex({ id: "job-a" }), prospex({ id: "job-b", Company: { label: "Prospex Group", value: "prospex group" } })]);
+    const r = await autoFileImport(db as never, "u1", { ...base, classification: "rejection", extractedData: { company: "Prospex", jobTitle: "Graduate Integration Engineer" } });
+    expect(r.status).toBe("pending");
+    expect(db.job.update).not.toHaveBeenCalled();
+    expect(db.job.create).not.toHaveBeenCalled();
+  });
+
+  test("no title: no loose match, stays pending as before", async () => {
+    const db = looseDb([prospex()]);
+    const r = await autoFileImport(db as never, "u1", { ...base, classification: "rejection", extractedData: { company: "Prospex" } });
+    expect(r.status).toBe("pending");
+    expect(db.job.findMany).toHaveBeenCalledTimes(1);
   });
 });
 
